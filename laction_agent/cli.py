@@ -116,6 +116,17 @@ def _add_subcommands(p: argparse.ArgumentParser):
     traces_p.add_argument("--session", dest="traces_session", help="Filter session_id")
     traces_p.add_argument("--limit", type=int, default=20, help="Jumlah event terbaru (default 20)")
     traces_p.add_argument("--json", action="store_true", help="Output JSON")
+    traces_p.add_argument(
+        "--keep",
+        type=int,
+        default=10_000,
+        help="Dengan --prune: simpan hanya N event terbaru (default 10000)",
+    )
+    traces_p.add_argument(
+        "--prune",
+        action="store_true",
+        help="Hapus tool_events lama (riwayat chat tidak disentuh)",
+    )
 
     mcp_p = sub.add_parser("mcp", help="Kelola server MCP (allowlist eksplisit)")
     mcp_sub = mcp_p.add_subparsers(dest="mcp_command")
@@ -401,6 +412,7 @@ def cmd_status(cfg: Config, args: argparse.Namespace) -> int:
         "workspace": str(Path(cfg.workspace).expanduser().resolve()) if cfg.workspace else str(Path.cwd().resolve()),
         "sandbox_mode": cfg.sandbox_mode,
         "tool_metrics": db.tool_metrics(),
+        "db_stats": db.stats(),
         "mcp_servers": [s["name"] for s in MCPRegistry(home).list_servers()],
     }
     if args.json:
@@ -421,7 +433,12 @@ def cmd_status(cfg: Config, args: argparse.Namespace) -> int:
     print(f"  Sandbox      : {cfg.sandbox_mode}")
     print(f"  Approval     : {cfg.approval_mode}")
     metrics = data["tool_metrics"]
+    stats = data["db_stats"]
     print(f"  Tool events  : {metrics['total_calls']} panggilan (avg {metrics['avg_duration_ms']} ms)")
+    print(
+        f"  Session DB   : {stats['messages']} pesan / {stats['sessions']} sesi / "
+        f"{stats['tool_events']} event ({stats['size_bytes']} byte, FTS5={'ya' if stats['fts_enabled'] else 'tidak'})"
+    )
     print(f"  MCP servers  : {len(data['mcp_servers'])} ({', '.join(data['mcp_servers']) or '-'})")
     for w in cfg.warnings():
         print(f"  ⚠️  {w}")
@@ -519,6 +536,17 @@ def cmd_traces(cfg: Config, args: argparse.Namespace) -> int:
     db = SessionDB(Path(cfg.home).expanduser())
     sid = getattr(args, "traces_session", None) or getattr(args, "session", None) or None
     limit = max(1, min(int(getattr(args, "limit", 20) or 20), 200))
+    if getattr(args, "prune", False):
+        result = db.prune_tool_events(keep=getattr(args, "keep", 10_000))
+        message = (
+            f"🧹 tool_events: {result['before']} → {result['after']} "
+            f"(dihapus {result['deleted']}, simpan {result['keep']})"
+        )
+        if args.json:
+            print(json.dumps({**result, "message": message}, ensure_ascii=False, indent=2))
+        else:
+            print(message)
+        return 0
     if args.json:
         print(json.dumps({
             "session_id": sid,

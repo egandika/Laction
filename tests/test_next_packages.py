@@ -152,6 +152,28 @@ class SessionFTS5Tests(unittest.TestCase):
             self.assertTrue(db.recovered_from)
             self.assertTrue(Path(db.recovered_from).exists())
 
+    def test_prune_tool_events_keeps_newest(self):
+        for i in range(12):
+            self.db.record_tool_event(self.sid, f"tool_{i}", "ok", i, "{}", "ok")
+        result = self.db.prune_tool_events(keep=5)
+        self.assertEqual(result["deleted"], 7)
+        self.assertEqual(result["after"], 5)
+        remaining = {ev["tool_name"] for ev in self.db.tool_events(limit=50)}
+        self.assertEqual(remaining, {f"tool_{i}" for i in range(7, 12)})
+        # Pesan chat tidak ikut terhapus.
+        self.db.save(self.sid, "user", "riwayat tetap ada")
+        self.assertEqual(self.db.prune_tool_events(keep=5)["deleted"], 0)
+        self.assertTrue(self.db.search("riwayat"))
+
+    def test_stats_reports_counts(self):
+        self.db.save(self.sid, "user", "halo")
+        self.db.record_tool_event(self.sid, "read_file", "ok", 1, "{}", "ok")
+        stats = self.db.stats()
+        self.assertEqual(stats["sessions"], 1)
+        self.assertEqual(stats["tool_events"], 1)
+        self.assertGreaterEqual(stats["size_bytes"], 0)
+        self.assertTrue(stats["fts_enabled"])
+
     def test_tool_event_preview_redacted(self):
         self.db.record_tool_event(self.sid, "run_terminal", "ok", 1, "api_key=rahasia-banget", "ok")
         event = self.db.tool_events(self.sid)[0]
@@ -417,6 +439,13 @@ class CliAndSurfaceTests(unittest.TestCase):
         self.assertEqual(args.sandbox_mode, "docker")
         self.assertEqual(args.command, "status")
 
+    def test_traces_prune_flags(self):
+        args = parse_args(["traces", "--prune", "--keep", "7"])
+        self.assertTrue(args.prune)
+        self.assertEqual(args.keep, 7)
+        plain = parse_args(["traces"])
+        self.assertFalse(plain.prune)
+
     def test_parser_accepts_new_subcommands(self):
         args = parse_args(["memory", "prune", "--max-entries", "5", "--max-chars", "900", "--target", "user"])
         self.assertEqual(args.command, "memory")
@@ -616,6 +645,18 @@ class GatewayEndpointTests(unittest.TestCase):
             self.assertEqual(status, 200)
         _, health = self._get(port, "/health")
         self.assertLessEqual(health["sessions_cached"], gw.MAX_AGENT_SESSIONS)
+
+    def test_traces_prune_endpoint(self):
+        db = SessionDB(Path(self.home))
+        sid = db.new_session()
+        for i in range(6):
+            db.record_tool_event(sid, f"t{i}", "ok", i, "{}", "ok")
+        port = self._start()
+        status, data = self._post(port, "/traces", {"keep": 2})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["pruned"]["deleted"], 4)
+        _, traces = self._get(port, "/traces?limit=10")
+        self.assertEqual(len(traces["events"]), 2)
 
     def test_mcp_probe_endpoint(self):
         import sys as _sys

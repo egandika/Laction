@@ -207,14 +207,16 @@ Estimasi token = `len(content)/4` + argumen tool call. Angka kasar, tapi cukup u
 | Surface | Karakter |
 |---|---|
 | `cli.py` | One-shot, REPL dengan slash command (`/memory`, `/traces`, dst.), `status/tools/skills/memory/traces/mcp/init/doctor`, approve interaktif |
-| `gateway.py` | `ThreadingHTTPServer`, UI HTML/JS tanpa build, semua fetch relatif (aman di balik proxy preview), CORS terbuka, token opsional; endpoint `/traces`, `/mcp`, `POST /memory` prune |
+| `gateway.py` | `ThreadingHTTPServer`, UI HTML/JS tanpa build, semua fetch relatif (aman di balik proxy preview), CORS terbuka, token opsional; endpoint `/traces` (+`POST /traces` retensi), `/mcp` (+`POST /mcp` probe), `POST /memory` prune |
 | `cron/scheduler.py` | `cron.json` + daemon thread; tiap job memanggil `AIAgent(cfg)` dengan sesi baru agar riwayat cron tidak bercampur chat |
 
 Gateway menyimpan satu `AIAgent` per `session_id` di memori (cache LRU maks 32 sesi) dan memserialisasi `agent.run()` dengan `run_lock` bertimeout 120 detik; permintaan yang tidak mendapat lock dijawab `429` dengan `retry_after_seconds`, bukan menggantung. `/health` melaporkan `sessions_cached`, `sandbox_mode`, dan `uptime_seconds`.
 
 ### Observability (`tool_events`)
 
-`AIAgent.run()` membungkus setiap panggilan tool dengan `time.perf_counter()` dan menulis satu baris ke tabel `tool_events` (`session_id`, `tool_name`, `status` ∈ `ok|error|denied|reflexion_blocked`, `duration_ms`, preview argumen/hasil yang sudah di-redaksi). `SessionDB.tool_metrics()` mengagregasi total/avg/max per status & per tool. Surface-nya: `laction traces [--session --limit --json]`, `/traces` di REPL, blok `Tool events` di `laction status`, dan `GET /traces` + tombol **Traces** di gateway.
+`AIAgent.run()` membungkus setiap panggilan tool dengan `time.perf_counter()` dan menulis satu baris ke tabel `tool_events` (`session_id`, `tool_name`, `status` ∈ `ok|error|denied|reflexion_blocked`, `duration_ms`, preview argumen/hasil yang sudah di-redaksi). `SessionDB.tool_metrics()` mengagregasi total/avg/max per status & per tool. Surface-nya: `laction traces [--session --limit --json]`, `/traces` di REPL, blok `Tool events` + `db_stats` di `laction status`, dan `GET /traces` + tombol **Traces** di gateway.
+
+Retensi: `tool_events` tidak append-only selamanya. `SessionDB.prune_tool_events(keep=N)` membuang event terlama (tabel `messages` tidak disentuh), tersedia lewat `laction traces --prune --keep N` dan `POST /traces {"keep": N}`. `SessionDB.stats()` memberi jumlah pesan/sesi/event + ukuran file untuk `status`.
 
 ---
 

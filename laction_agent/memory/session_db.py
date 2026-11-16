@@ -256,6 +256,51 @@ class SessionDB:
                 ).fetchall()
         return [dict(r) for r in rows]
 
+    def stats(self) -> dict:
+        """Ringkasan isi DB untuk `status`/`doctor` (bukan data sensitif)."""
+        with self._connect() as conn:
+            messages = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            sessions = conn.execute("SELECT COUNT(DISTINCT session_id) FROM messages").fetchone()[0]
+            events = conn.execute("SELECT COUNT(*) FROM tool_events").fetchone()[0]
+        try:
+            size_bytes = self.db_path.stat().st_size
+        except OSError:
+            size_bytes = 0
+        return {
+            "messages": int(messages),
+            "sessions": int(sessions),
+            "tool_events": int(events),
+            "size_bytes": size_bytes,
+            "fts_enabled": self.fts_enabled,
+            "recovered_from": self.recovered_from,
+        }
+
+    def prune_tool_events(self, keep: int = 10_000) -> dict:
+        """Simpan hanya `keep` event terbaru; sisanya dihapus.
+
+        `tool_events` tumbuh setiap panggilan tool. Tanpa retensi, DB gateway
+        yang berjalan lama bisa membengkak dan `laction traces` makin lambat.
+        Baris pesan/riwayat chat tidak disentuh.
+        """
+        keep = max(0, int(keep))
+        with self._connect() as conn:
+            before = conn.execute("SELECT COUNT(*) FROM tool_events").fetchone()[0]
+            if before <= keep:
+                return {"before": int(before), "after": int(before), "deleted": 0, "keep": keep}
+            conn.execute(
+                """DELETE FROM tool_events WHERE id NOT IN (
+                    SELECT id FROM tool_events ORDER BY created_at DESC LIMIT ?
+                )""",
+                (keep,),
+            )
+            after = conn.execute("SELECT COUNT(*) FROM tool_events").fetchone()[0]
+        return {
+            "before": int(before),
+            "after": int(after),
+            "deleted": int(before) - int(after),
+            "keep": keep,
+        }
+
     def tool_metrics(self, session_id: str | None = None) -> dict:
         where = "WHERE session_id=?" if session_id else ""
         params = (session_id,) if session_id else ()
