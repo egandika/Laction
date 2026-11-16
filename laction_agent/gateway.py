@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import __version__
 from .agent import AIAgent
+from .policies import READ_ONLY_TOOLS
 from .config import Config
 from .cron.scheduler import CronScheduler
 from .memory.manager import MemoryManager
@@ -385,7 +386,7 @@ def run_server(
     if cfg.cron_enabled:
         def _cron_run(task: str) -> str:
             # Sesi terisolasi tiap run agar riwayat cron tidak bercampur dengan chat.
-            return AIAgent(cfg).run(f"[cron] {task}")
+            return AIAgent(cfg, allowed_tools=READ_ONLY_TOOLS).run(f"[cron] {task}")
 
         scheduler = CronScheduler(home, on_run=_cron_run)
         scheduler.start()

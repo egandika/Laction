@@ -68,7 +68,12 @@ class SkillManager:
         if not body.startswith("---"):
             first_line = body.splitlines()[0][:80] if body else name
             body = f"---\nname: {name}\ndescription: {first_line}\n---\n\n{body}\n"
-        skill_file.write_text(body, encoding="utf-8")
+        # Do not follow a pre-existing directory symlink outside the skill home.
+        if folder.resolve().parent != self.skills_dir.resolve():
+            raise ValueError("Path skill di luar direktori skill ditolak.")
+        # Exclusive create: never silently replace an existing skill, even in a race.
+        with skill_file.open("x", encoding="utf-8") as stream:
+            stream.write(body)
         return str(skill_file)
 
     def delete_skill(self, name: str) -> bool:

@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from .registry import get_registry
+from .python_tool import _approval_display
 
 # Frasa berbahaya. Dicek sebagai token utuh di seluruh command, bukan cuma
 # di awal string — supaya `echo aman; rm -rf /tmp/x` tidak lolos.
@@ -52,26 +53,23 @@ def run_terminal(command: str, context: dict) -> str:
     approve = context.get("approve")
     dangerous = _is_dangerous(command)
 
-    if dangerous and mode == "never":
-        return "DITOLAK: perintah berbahaya diblokir (approval_mode=never)."
+    if mode == "never":
+        return "DITOLAK: semua perintah shell diblokir (approval_mode=never)."
 
-    needs_approval = mode == "always" or (mode == "smart" and dangerous)
-    if needs_approval:
-        if approve is None:
-            return (
-                f"PERLU APPROVAL: perintah '{command}' tidak dijalankan otomatis. "
-                "Pakai CLI interaktif, atau set approval_mode=smart/never dengan sadar."
-            )
-        try:
-            if not approve(command):
-                return "DITOLAK: user tidak menyetujui perintah."
-        except Exception as e:  # noqa: BLE001
-            return f"DITOLAK: gagal meminta approval: {e}"
+    if approve is None:
+        return "PERLU APPROVAL: shell tidak dijalankan otomatis. Pakai CLI interaktif untuk meninjau perintah."
+    try:
+        warning = " [terdeteksi berbahaya]" if dangerous else ""
+        if not approve(f"Shell bukan sandbox{warning}:\n{_approval_display(command)}"):
+            return "DITOLAK: user tidak menyetujui perintah."
+    except Exception as e:  # noqa: BLE001
+        return f"DITOLAK: gagal meminta approval: {e}"
 
     try:
         proc = subprocess.run(
             command,
             shell=True,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=30,

@@ -44,7 +44,7 @@ class TestAgent(unittest.TestCase):
 
     def test_skill_self_creation(self):
         with tempfile.TemporaryDirectory() as tmp:
-            agent = AIAgent(make_cfg(tmp))
+            agent = AIAgent(make_cfg(tmp), approve=lambda _: True)
             created = agent.run("buat skill kopi: 1. seduh 2. sajikan")
             self.assertIn("dibuat", created)
             self.assertTrue((Path(tmp) / "skills" / "kopi" / "SKILL.md").exists())
