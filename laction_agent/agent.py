@@ -7,6 +7,7 @@ Fitur: memory, skills, session DB, context compression, sub-agent terisolasi.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from dataclasses import replace
 from typing import Callable
@@ -67,6 +68,8 @@ class AIAgent:
             "cfg": self.cfg,
             "cron": self.cron,
             "approval_mode": self.cfg.approval_mode,
+            "sandbox_mode": self.cfg.sandbox_mode,
+            "workspace": self.cfg.workspace,
             "approve": self.approve,
             # Hanya agent utama dapat mendelegasikan; anak tidak punya subdelegasi.
             "delegate": self._delegate if self.depth < 2 and self.allowed_tools is None else None,
@@ -80,9 +83,15 @@ class AIAgent:
         child.cron = self.cron
         return child.run(task)
 
-    def _team(self, task: str, roles: list[str] | None = None, mode: str = "specialists") -> str:
+    def _team(
+        self,
+        task: str,
+        roles: list[str] | None = None,
+        mode: str = "specialists",
+        timeout_seconds: int | None = None,
+    ) -> str:
         from .team import run_team
-        return run_team(self.cfg, task, roles, mode=mode)
+        return run_team(self.cfg, task, roles, mode=mode, timeout_seconds=timeout_seconds)
 
     def _persist(self, role: str, text: str) -> None:
         """Simpan riwayat ke SQLite dengan kredensial disamarkan.
@@ -108,11 +117,37 @@ class AIAgent:
             "ERROR",
             "DITOLAK",
             "PERLU APPROVAL",
+            "TIMEOUT",
             "File tidak ditemukan:",
             "Path tidak ditemukan:",
             "Skill tidak ditemukan:",
             '{"error":',
         ))
+
+    @staticmethod
+    def _event_status(result: str) -> str:
+        head = (result or "").lstrip()
+        if head.startswith(("DITOLAK", "PERLU APPROVAL")):
+            return "denied"
+        if head.startswith("REFLEXION GUARD"):
+            return "reflexion_blocked"
+        if head.startswith(("ERROR", "TIMEOUT")) or head.startswith('{"error":'):
+            return "error"
+        return "ok"
+
+    def _record_event(self, name: str, status: str, duration_ms: int, arguments, result: str) -> None:
+        """Observability lokal: jangan pernah menggagalkan agent karena logging."""
+        try:
+            self.db.record_tool_event(
+                session_id=self.session_id,
+                tool_name=name,
+                status=status,
+                duration_ms=duration_ms,
+                args_preview=json.dumps(arguments or {}, ensure_ascii=False, default=str),
+                result_preview=result or "",
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("Gagal mencatat tool event", exc_info=True)
 
     def run(self, user_input: str) -> str:
         self.history.append(Message(role="user", content=user_input))
@@ -144,6 +179,7 @@ class AIAgent:
             )
             for tc in calls:
                 sig = self._call_signature(tc.name, tc.arguments)
+                started = time.perf_counter()
                 if sig in failed_calls:
                     result = (
                         f"REFLEXION GUARD: panggilan identik '{tc.name}' sudah gagal/ditolak sebelumnya "
@@ -157,6 +193,8 @@ class AIAgent:
                     elif tc.name not in READ_ONLY_TOOLS:
                         # Aksi mutasi berhasil; reset cache kegagalan agar pembacaan ulang tetap dimungkinkan.
                         failed_calls.clear()
+                elapsed_ms = int((time.perf_counter() - started) * 1000)
+                self._record_event(tc.name, self._event_status(result), elapsed_ms, tc.arguments, result)
                 self.history.append(
                     Message(role="tool", content=result, tool_call_id=tc.id or tc.name)
                 )

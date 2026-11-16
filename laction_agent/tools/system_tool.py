@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 
 from .. import __version__
+from . import file_tools
 from .registry import get_registry
 
 reg = get_registry()
@@ -41,10 +42,12 @@ def agent_info(context: dict) -> str:
     tools = [t["name"] for t in get_registry().schemas(allowed)]
     provider = getattr(cfg, "provider", "mock")
     model = getattr(cfg, "model", "mock-laction-1")
+    sandbox = getattr(cfg, "sandbox_mode", "none")
     return (
         f"Laction Agent v{__version__}\n"
         f"Provider: {provider}\n"
         f"Model: {model}\n"
+        f"Sandbox: {sandbox}\n"
         f"Tools: {len(tools)}\n"
         f"Daftar: {', '.join(tools)}"
     )
@@ -56,7 +59,8 @@ def agent_info(context: dict) -> str:
     {"type": "object", "properties": {}},
 )
 def device_health(context: dict | None = None) -> str:
-    disk = shutil.disk_usage(Path.cwd())
+    ws = file_tools.get_workspace(context)
+    disk = shutil.disk_usage(ws if ws.exists() else Path.cwd())
     lines = [f"Storage workspace: total={disk.total} byte, tersedia={disk.free} byte"]
     try:
         values = {}

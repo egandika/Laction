@@ -13,6 +13,7 @@ Kalau PyYAML terpasang, otomatis dipakai.
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -22,9 +23,13 @@ ENV_MAP = {
     "LACTION_API_BASE": "api_base",
     "LACTION_API_KEY": "api_key",
     "LACTION_HOME": "home",
+    "LACTION_WORKSPACE": "workspace",
     "LACTION_MAX_ITERATIONS": "max_iterations",
     "LACTION_CONTEXT_LIMIT": "context_limit",
     "LACTION_APPROVAL_MODE": "approval_mode",
+    "LACTION_SANDBOX_MODE": "sandbox_mode",
+    "LACTION_DOCKER_IMAGE": "docker_image",
+    "LACTION_TEAM_TIMEOUT": "team_timeout_seconds",
     "LACTION_CRON_ENABLED": "cron_enabled",
 }
 
@@ -32,6 +37,7 @@ VALID_PROVIDERS = {
     "mock", "openai", "openrouter", "ollama", "nous", "gemini", "openai_compat", "custom"
 }
 VALID_APPROVAL_MODES = {"smart", "always", "never"}
+VALID_SANDBOX_MODES = {"none", "auto", "docker"}
 
 
 @dataclass
@@ -41,9 +47,13 @@ class Config:
     api_base: str = ""
     api_key: str = ""
     home: str = "./data"
+    workspace: str = ""
     max_iterations: int = 10
     context_limit: int = 8000
     approval_mode: str = "smart"  # smart | always | never
+    sandbox_mode: str = "none"    # none | auto | docker
+    docker_image: str = "python:3.11-slim"
+    team_timeout_seconds: int = 45
     cron_enabled: bool = True
 
     @classmethod
@@ -76,6 +86,9 @@ class Config:
     def validate(self) -> "Config":
         self.provider = self.provider.strip().lower()
         self.approval_mode = self.approval_mode.strip().lower()
+        self.sandbox_mode = self.sandbox_mode.strip().lower()
+        self.workspace = self.workspace.strip()
+        self.docker_image = self.docker_image.strip() or "python:3.11-slim"
         if self.provider not in VALID_PROVIDERS:
             raise ValueError(
                 f"Provider tidak dikenal: {self.provider}. "
@@ -85,10 +98,16 @@ class Config:
             raise ValueError(
                 f"approval_mode harus salah satu dari: {', '.join(sorted(VALID_APPROVAL_MODES))}"
             )
+        if self.sandbox_mode not in VALID_SANDBOX_MODES:
+            raise ValueError(
+                f"sandbox_mode harus salah satu dari: {', '.join(sorted(VALID_SANDBOX_MODES))}"
+            )
         if self.max_iterations < 1:
             raise ValueError("max_iterations minimal 1")
         if self.context_limit < 1000:
             raise ValueError("context_limit minimal 1000 token")
+        if self.team_timeout_seconds < 1:
+            raise ValueError("team_timeout_seconds minimal 1 detik")
         return self
 
     def as_dict(self, redact: bool = True) -> dict:
@@ -108,6 +127,11 @@ class Config:
             out.append(
                 "approval_mode=never menonaktifkan prompt persetujuan; "
                 "semua perintah shell dan Python tetap diblokir."
+            )
+        if self.sandbox_mode == "docker" and shutil.which("docker") is None:
+            out.append(
+                "sandbox_mode=docker aktif tetapi binary 'docker' tidak ditemukan; "
+                "eksekusi shell/Python akan ditolak (fail-closed)."
             )
         if self.provider == "ollama" and (
             not self.api_base

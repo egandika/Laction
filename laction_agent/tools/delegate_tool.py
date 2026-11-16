@@ -6,6 +6,7 @@ sendiri, jadi context window agent utama tidak tercemar.
 """
 from __future__ import annotations
 
+from ..team import MAX_TEAM_TIMEOUT, MIN_TEAM_TIMEOUT
 from .registry import get_registry
 
 reg = get_registry()
@@ -33,10 +34,22 @@ def delegate_task(task: str, context: dict) -> str:
         "task": {"type": "string", "description": "Tugas dan konteks yang boleh dibagikan ke provider"},
         "roles": {"type": "array", "items": {"type": "string", "enum": ["apk", "research", "report"]}, "minItems": 1, "maxItems": 2, "description": "Dipakai pada mode='specialists' (default ['research', 'report'])."},
         "mode": {"type": "string", "enum": ["specialists", "debate"], "description": "specialists (default) atau debate (1 putaran Pro vs Contra + reviewer)."},
+        "timeout_seconds": {
+            "type": "integer",
+            "description": f"Batas wall-clock total tim dalam detik ({MIN_TEAM_TIMEOUT}–{MAX_TEAM_TIMEOUT}); default dari LACTION_TEAM_TIMEOUT.",
+            "minimum": MIN_TEAM_TIMEOUT,
+            "maximum": MAX_TEAM_TIMEOUT,
+        },
     }, "required": ["task"]},
 )
-def consult_team(task: str, roles: list[str] | None = None, mode: str = "specialists", context: dict | None = None) -> str:
+def consult_team(
+    task: str,
+    roles: list[str] | None = None,
+    mode: str = "specialists",
+    context: dict | None = None,
+    timeout_seconds: int | None = None,
+) -> str:
     team = (context or {}).get("team")
     if team is None:
         return "DITOLAK: tim tidak tersedia di konteks ini."
-    return team(task, roles, mode=mode)
+    return team(task, roles, mode=mode, timeout_seconds=timeout_seconds)

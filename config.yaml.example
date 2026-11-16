@@ -8,13 +8,19 @@ api_base: ""
 api_key: ""
 
 home: ./data
+workspace: ""
 max_iterations: 10
 context_limit: 8000
+team_timeout_seconds: 45
 
-# Keamanan terminal: smart = minta approval hanya untuk perintah berbahaya
-#                    always = semua perintah shell minta approval
-#                    never  = blokir perintah berbahaya, sisanya langsung jalan
+# Persetujuan eksekusi:
+# - smart / always : run_terminal, run_python, create_skill, dan mcp_call meminta approval eksplisit
+# - never          : blokir seluruh eksekusi shell, Python, skill baru, dan MCP eksternal
 approval_mode: smart
+
+# Backend isolasi opsional (none | auto | docker)
+sandbox_mode: none
+docker_image: python:3.11-slim
 
 # Cron scheduler (dipakai oleh `laction gateway` / `laction cron start`)
 cron_enabled: true
