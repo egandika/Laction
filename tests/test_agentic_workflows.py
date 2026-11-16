@@ -194,5 +194,113 @@ class TestAdditionalGuards(unittest.TestCase):
             self.assertNotIn("four", scheduler._running)
 
 
+class TestDebateAndReflexion(unittest.TestCase):
+    def test_debate_mode_runs_pro_contra_and_judge(self):
+        barrier = threading.Barrier(2, timeout=5)
+        calls = []
+        lock = threading.Lock()
+
+        class FakeAgent:
+            def __init__(self, cfg, **kwargs):
+                self.role = kwargs["role"]
+                self.allowed = kwargs["allowed_tools"]
+                self.iterations = cfg.max_iterations
+
+            def run(self, task):
+                with lock:
+                    calls.append((self.role, task, self.allowed, self.iterations))
+                if "Evaluator" not in self.role:
+                    barrier.wait()
+                    return "posisi " + self.role[:12]
+                return "perlu verifikasi lanjutan"
+
+        with tempfile.TemporaryDirectory() as home, patch("laction_agent.agent.AIAgent", FakeAgent):
+            result = run_team(Config(home=home, max_iterations=20), "bandingkan A vs B", mode="debate")
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(c[2] == READ_ONLY_TOOLS and c[3] == 4 for c in calls))
+        self.assertIn("[pro]", calls[-1][1])
+        self.assertIn("[contra]", calls[-1][1])
+        self.assertIn("perlu verifikasi lanjutan", result)
+
+    def test_debate_rejects_invalid_mode_and_mock_is_honest(self):
+        self.assertIn("ERROR", run_team(Config(), "hello", mode="swarm"))
+        with tempfile.TemporaryDirectory() as home:
+            result = AIAgent(Config(home=home)).run("debat: list file")
+        self.assertIn("Hasil debat 1-putaran", result)
+        self.assertIn("Mode mock tidak dapat memverifikasi", result)
+
+    def test_reflexion_guard_blocks_identical_repeat_and_resets_after_mutation(self):
+        class RepeatProvider:
+            def __init__(self):
+                self.step = 0
+                self.tool_outputs = []
+
+            def chat(self, messages, tools):
+                if messages[-1].role == "tool":
+                    self.tool_outputs.append(messages[-1].content)
+                self.step += 1
+                if self.step == 1:
+                    return ProviderResponse(tool_calls=[ToolCall("read_file", {"path": "tidak-ada-xy9.txt"}, "1")])
+                if self.step == 2:
+                    return ProviderResponse(tool_calls=[ToolCall("read_file", {"path": "tidak-ada-xy9.txt"}, "2")])
+                if self.step == 3:
+                    return ProviderResponse(tool_calls=[ToolCall("write_file", {"path": "data/test-reflexion.txt", "content": "ok"}, "3")])
+                if self.step == 4:
+                    return ProviderResponse(tool_calls=[ToolCall("read_file", {"path": "data/test-reflexion.txt"}, "4")])
+                return ProviderResponse(content="selesai")
+
+        with tempfile.TemporaryDirectory() as home:
+            agent = AIAgent(Config(home=home))
+            provider = RepeatProvider()
+            agent.provider = provider
+            try:
+                self.assertEqual(agent.run("uji reflexion"), "selesai")
+            finally:
+                Path("data/test-reflexion.txt").unlink(missing_ok=True)
+        self.assertIn("File tidak ditemukan", provider.tool_outputs[0])
+        self.assertIn("REFLEXION GUARD", provider.tool_outputs[1])
+        self.assertIn("Berhasil", provider.tool_outputs[2])
+        self.assertIn("ok", provider.tool_outputs[3])
+
+    def test_reflexion_guard_blocks_repeated_rejected_approval(self):
+        approvals = []
+
+        class NagProvider:
+            def __init__(self):
+                self.step = 0
+                self.tool_outputs = []
+
+            def chat(self, messages, tools):
+                if messages[-1].role == "tool":
+                    self.tool_outputs.append(messages[-1].content)
+                self.step += 1
+                if self.step in (1, 2):
+                    return ProviderResponse(tool_calls=[ToolCall("run_terminal", {"command": "echo hi"}, str(self.step))])
+                return ProviderResponse(content="dibatalkan")
+
+        with tempfile.TemporaryDirectory() as home:
+            agent = AIAgent(Config(home=home), approve=lambda p: approvals.append(p) or False)
+            provider = NagProvider()
+            agent.provider = provider
+            self.assertEqual(agent.run("uji approval"), "dibatalkan")
+        self.assertEqual(len(approvals), 1)
+        self.assertIn("DITOLAK", provider.tool_outputs[0])
+        self.assertIn("REFLEXION GUARD", provider.tool_outputs[1])
+
+    def test_prompt_catalog_displays_all_bundled_skills_within_budget(self):
+        from laction_agent.memory.manager import MemoryManager
+        from laction_agent.prompt_builder import build_system_prompt
+
+        with tempfile.TemporaryDirectory() as home:
+            p = Path(home)
+            mgr = MemoryManager(p)
+            (p / "MEMORY.md").write_text("# MEMORY\n" + "z" * 9000, encoding="utf-8")
+            prompt = build_system_prompt(mgr, SkillManager(p))
+        self.assertLess(len(prompt), 10_000)
+        self.assertNotIn("skill lain tidak ditampilkan", prompt)
+        for skill in ("verification-cove", "adversarial-thinking", "structured-reflexion"):
+            self.assertIn(skill, prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

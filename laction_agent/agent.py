@@ -6,6 +6,7 @@ Fitur: memory, skills, session DB, context compression, sub-agent terisolasi.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from dataclasses import replace
 from typing import Callable
@@ -79,9 +80,9 @@ class AIAgent:
         child.cron = self.cron
         return child.run(task)
 
-    def _team(self, task: str, roles: list[str]) -> str:
+    def _team(self, task: str, roles: list[str] | None = None, mode: str = "specialists") -> str:
         from .team import run_team
-        return run_team(self.cfg, task, roles)
+        return run_team(self.cfg, task, roles, mode=mode)
 
     def _persist(self, role: str, text: str) -> None:
         """Simpan riwayat ke SQLite dengan kredensial disamarkan.
@@ -92,11 +93,33 @@ class AIAgent:
         """
         self.db.save(self.session_id, role, redact(text))
 
+    @staticmethod
+    def _call_signature(name: str, arguments: dict | None) -> tuple[str, str]:
+        try:
+            canonical = json.dumps(arguments or {}, sort_keys=True, ensure_ascii=False, default=str)
+        except TypeError:
+            canonical = repr(arguments)
+        return (name, canonical)
+
+    @staticmethod
+    def _is_failed_result(result: str) -> bool:
+        head = (result or "").lstrip()
+        return head.startswith((
+            "ERROR",
+            "DITOLAK",
+            "PERLU APPROVAL",
+            "File tidak ditemukan:",
+            "Path tidak ditemukan:",
+            "Skill tidak ditemukan:",
+            '{"error":',
+        ))
+
     def run(self, user_input: str) -> str:
         self.history.append(Message(role="user", content=user_input))
         self._persist("user", user_input)
 
         tools = self.registry.schemas(self.allowed_tools)
+        failed_calls: dict[tuple[str, str], str] = {}
         final = ""
         for _ in range(self.cfg.max_iterations):
             self.history = compress(self.history, self.cfg.context_limit)
@@ -120,8 +143,20 @@ class AIAgent:
                 Message(role="assistant", content=resp.content or "", tool_calls=calls)
             )
             for tc in calls:
-                log.info("Tool call: %s(%s)", tc.name, redact(repr(tc.arguments)))
-                result = self.registry.call(tc.name, tc.arguments, context=self._context())
+                sig = self._call_signature(tc.name, tc.arguments)
+                if sig in failed_calls:
+                    result = (
+                        f"REFLEXION GUARD: panggilan identik '{tc.name}' sudah gagal/ditolak sebelumnya "
+                        f"({failed_calls[sig]}). Jangan mengulang persis; analisis penyebabnya, ubah argumen/pendekatan, atau laporkan hambatan ke user."
+                    )
+                else:
+                    log.info("Tool call: %s(%s)", tc.name, redact(repr(tc.arguments)))
+                    result = self.registry.call(tc.name, tc.arguments, context=self._context())
+                    if self._is_failed_result(result):
+                        failed_calls[sig] = redact(result.splitlines()[0][:140])
+                    elif tc.name not in READ_ONLY_TOOLS:
+                        # Aksi mutasi berhasil; reset cache kegagalan agar pembacaan ulang tetap dimungkinkan.
+                        failed_calls.clear()
                 self.history.append(
                     Message(role="tool", content=result, tool_call_id=tc.id or tc.name)
                 )

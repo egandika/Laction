@@ -93,7 +93,10 @@ class MockProvider(BaseProvider):
                 return ProviderResponse(content="ERROR: evolusi membutuhkan objek JSON yang valid.")
         team = re.match(r"(?:tim|team):\s*(.+)", user_text, re.IGNORECASE | re.DOTALL)
         if team:
-            return ProviderResponse(tool_calls=[ToolCall("consult_team", {"task": team.group(1).strip(), "roles": ["research", "report"]}, self._next_id())])
+            return ProviderResponse(tool_calls=[ToolCall("consult_team", {"task": team.group(1).strip(), "roles": ["research", "report"], "mode": "specialists"}, self._next_id())])
+        debate = re.match(r"(?:debat|debate):\s*(.+)", user_text, re.IGNORECASE | re.DOTALL)
+        if debate:
+            return ProviderResponse(tool_calls=[ToolCall("consult_team", {"task": debate.group(1).strip(), "mode": "debate"}, self._next_id())])
         if re.search(r"\b(?:cek|periksa)\s+(?:kesehatan|ram|storage)\b", text):
             return ProviderResponse(tool_calls=[ToolCall("device_health", {}, self._next_id())])
 

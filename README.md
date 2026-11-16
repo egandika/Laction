@@ -35,6 +35,8 @@ Dokumen lanjutan:
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — desain mendalam, diagram Mermaid, trace satu turn.
 - [`docs/REVIEW.md`](docs/REVIEW.md) — **review kode**: penjelasan cara kerja tiap bagian, 9 temuan bug (termasuk 3 celah keamanan), perbaikan, dan risiko residual.
 - [`docs/SKILLS.md`](docs/SKILLS.md) — analisis riset daftar skill, fitur yang dipilih/ditunda, batasan, dan sumber.
+- [`docs/AGENTIC.md`](docs/AGENTIC.md) — batasan orkestrasi tim, cron read-only, approval, dan simulasi.
+- [`docs/METHODS.md`](docs/METHODS.md) — analisis riset 47 metode/teknik agent (A–H), pemetaan ke Laction, dan template prompt efektif.
 
 ---
 
@@ -90,6 +92,7 @@ laction "lihat skill repo-onboarding"
 laction chat  # di chat: buat skill ringkas-repo: 1. list file 2. baca README (perlu approval)
 laction "delegasikan: list tool"
 laction "tim: list file"                     # dua spesialis + reviewer read-only
+laction "debat: list file"                   # debat 1-putaran pro vs contra + reviewer
 laction "cek kesehatan"                     # RAM + storage, read-only
 laction 'evolusi: {"options":[{"name":"A","cost":1,"benefits":[2,3]}],"budget":1}'
 laction "list cron"
@@ -194,9 +197,9 @@ Laction/
 │   ├── agent.py               # 🔁 loop utama + sub-agent delegation
 │   ├── gateway.py             # HTTP API + UI chat (stdlib http.server)
 │   ├── providers/             # BaseProvider + mock/OpenAI-compatible (termasuk Gemini)
-│   ├── tools/                 # registry + 25 tool (self-register via decorator)
+│   ├── tools/                 # registry + 29 tool (self-register via decorator)
 │   ├── memory/                # MemoryManager (Markdown) + SessionDB (SQLite)
-│   ├── skills/                # SkillManager + 13 skill bawaan (SKILL.md)
+│   ├── skills/                # SkillManager + 16 skill bawaan (SKILL.md)
 │   └── cron/                  # CronScheduler (cron.json + thread)
 └── tests/                     # unittest, juga bisa jalan via pytest
 ```
@@ -216,7 +219,7 @@ Laction/
 | `memory_save`, `memory_read`, `user_save` | Tier-1 memory: `MEMORY.md` / `USER.md` |
 | `memory_search` | Tier-2: cari riwayat sesi di SQLite |
 | `list_skills`, `view_skill`, `create_skill` | Procedural memory / self-improvement |
-| `delegate_task`, `consult_team` | Sub-agent read-only; tim 1–2 spesialis paralel + reviewer, bukan sandbox |
+| `delegate_task`, `consult_team` | Sub-agent read-only; tim spesialis (`apk`/`research`/`report`) atau debat 1-putaran (`pro`/`contra`) + reviewer, bukan sandbox |
 | `device_health` | RAM dan storage read-only |
 | `simulate_files`, `evolve_plan` | Dunia file virtual in-memory dan simulasi evolusi numerik terbatas; tidak menerapkan perubahan |
 | `cron_add`, `cron_list`, `cron_remove` | Jadwal berulang |

@@ -233,7 +233,7 @@ class TestBundledSkillFormat(unittest.TestCase):
         pattern = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
         root = REPO_ROOT / "laction_agent" / "skills" / "bundled"
         skills = sorted(path for path in root.iterdir() if path.is_dir())
-        self.assertGreaterEqual(len(skills), 13)
+        self.assertGreaterEqual(len(skills), 16)
         for folder in skills:
             with self.subTest(skill=folder.name):
                 text = (folder / "SKILL.md").read_text(encoding="utf-8")

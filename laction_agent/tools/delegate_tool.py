@@ -28,14 +28,15 @@ def delegate_task(task: str, context: dict) -> str:
 
 @reg.register(
     "consult_team",
-    "Konsultasikan 1–2 spesialis read-only secara paralel, lalu reviewer terpisah. Tidak menerapkan perubahan. Provider eksternal tetap menerima tugas/temuan.",
+    "Konsultasikan 1–2 spesialis read-only atau debat 1 putaran (pro/contra) secara paralel, lalu reviewer terpisah. Tidak menerapkan perubahan; provider eksternal tetap menerima tugas/temuan.",
     {"type": "object", "properties": {
         "task": {"type": "string", "description": "Tugas dan konteks yang boleh dibagikan ke provider"},
-        "roles": {"type": "array", "items": {"type": "string", "enum": ["apk", "research", "report"]}, "minItems": 1, "maxItems": 2},
-    }, "required": ["task", "roles"]},
+        "roles": {"type": "array", "items": {"type": "string", "enum": ["apk", "research", "report"]}, "minItems": 1, "maxItems": 2, "description": "Dipakai pada mode='specialists' (default ['research', 'report'])."},
+        "mode": {"type": "string", "enum": ["specialists", "debate"], "description": "specialists (default) atau debate (1 putaran Pro vs Contra + reviewer)."},
+    }, "required": ["task"]},
 )
-def consult_team(task: str, roles: list[str], context: dict | None = None) -> str:
+def consult_team(task: str, roles: list[str] | None = None, mode: str = "specialists", context: dict | None = None) -> str:
     team = (context or {}).get("team")
     if team is None:
         return "DITOLAK: tim tidak tersedia di konteks ini."
-    return team(task, roles)
+    return team(task, roles, mode=mode)
