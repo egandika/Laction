@@ -116,6 +116,12 @@ HTML = r"""<!doctype html>
     </div>
     <div class="btns" style="margin-top:8px">
       <button id="prune">Prune memory</button>
+      <button id="prune-traces">Prune traces</button>
+    </div>
+    <h3>MCP</h3>
+    <input id="mcp-name" placeholder="nama server, mis. demo" autocomplete="off">
+    <div class="btns" style="margin-top:8px">
+      <button id="mcp-probe">Uji koneksi</button>
     </div>
     <pre id="panel">Klik tombol inspeksi untuk melihat state agent.</pre>
     <p style="color:var(--muted);font-size:11px;margin-bottom:0">
@@ -206,8 +212,23 @@ document.getElementById('prune').onclick = async () => {
     bubble('system', 'Memory dipangkas.');
   } catch (e) { panel.textContent = 'ERROR: ' + e.message; }
 };
+document.getElementById('prune-traces').onclick = async () => {
+  try {
+    const r = await api('/traces', {method:'POST', body: JSON.stringify({keep:10000})});
+    panel.textContent = JSON.stringify(r, null, 2);
+    bubble('system', 'Tool events dipangkas (riwayat chat tetap).');
+  } catch (e) { panel.textContent = 'ERROR: ' + e.message; }
+};
+document.getElementById('mcp-probe').onclick = async () => {
+  const name = document.getElementById('mcp-name').value.trim();
+  if (!name) { panel.textContent = 'Isi nama server MCP dulu.'; return; }
+  try {
+    const r = await api('/mcp', {method:'POST', body: JSON.stringify({name})});
+    panel.textContent = JSON.stringify(r, null, 2);
+  } catch (e) { panel.textContent = 'ERROR: ' + e.message; }
+};
 api('/health').then(d => {
-  statusEl.textContent = d.provider + ' · ' + d.model + ' · ' + d.tools + ' tools · v' + d.version;
+  statusEl.textContent = d.provider + ' · ' + d.model + ' · ' + d.tools + ' tools · sandbox=' + d.sandbox_mode + ' · v' + d.version;
 }).catch(e => { statusEl.textContent = 'offline: ' + e.message; });
 </script>
 </body>

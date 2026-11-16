@@ -207,7 +207,7 @@ Estimasi token = `len(content)/4` + argumen tool call. Angka kasar, tapi cukup u
 | Surface | Karakter |
 |---|---|
 | `cli.py` | One-shot, REPL dengan slash command (`/memory`, `/traces`, dst.), `status/tools/skills/memory/traces/mcp/init/doctor`, approve interaktif |
-| `gateway.py` | `ThreadingHTTPServer`, UI HTML/JS tanpa build, semua fetch relatif (aman di balik proxy preview), CORS terbuka, token opsional; endpoint `/traces` (+`POST /traces` retensi), `/mcp` (+`POST /mcp` probe), `POST /memory` prune |
+| `gateway.py` | `ThreadingHTTPServer`, UI HTML/JS tanpa build, semua fetch relatif (aman di balik proxy preview), CORS terbuka, token opsional; endpoint `/traces` (+`POST /traces` retensi), `/mcp` (+`POST /mcp` probe); UI punya tombol Prune memory/Prune traces/Uji koneksi MCP, `POST /memory` prune |
 | `cron/scheduler.py` | `cron.json` + daemon thread; tiap job memanggil `AIAgent(cfg)` dengan sesi baru agar riwayat cron tidak bercampur chat |
 
 Gateway menyimpan satu `AIAgent` per `session_id` di memori (cache LRU maks 32 sesi) dan memserialisasi `agent.run()` dengan `run_lock` bertimeout 120 detik; permintaan yang tidak mendapat lock dijawab `429` dengan `retry_after_seconds`, bukan menggantung. `/health` melaporkan `sessions_cached`, `sandbox_mode`, dan `uptime_seconds`.
