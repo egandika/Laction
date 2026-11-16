@@ -1,0 +1,561 @@
+"""
+CLI Laction Agent.
+
+Cara pakai:
+    laction "list file"                 # one-shot
+    laction chat                        # REPL interaktif
+    laction status                      # inspeksi konfigurasi
+    laction gateway --port 8000         # UI + HTTP API
+    python3 -m laction_agent "halo"     # tanpa install
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+try:  # history input di terminal, opsional
+    import readline  # noqa: F401
+except ImportError:
+    pass
+
+from . import __version__
+from .agent import AIAgent
+from .config import Config, VALID_APPROVAL_MODES, VALID_PROVIDERS
+from .cron.scheduler import CronScheduler
+from .memory.manager import MemoryManager
+from .memory.session_db import SessionDB
+from .skills.manager import SkillManager
+from .tools.registry import get_registry
+from .utils import log
+
+try:
+    from .gateway import run_server
+except ImportError:  # pragma: no cover — hanya bila gateway belum ada
+    run_server = None  # type: ignore[assignment]
+
+KNOWN_COMMANDS = {
+    "chat", "run", "init", "status", "tools", "skills", "memory", "cron", "gateway", "doctor"
+}
+
+
+def _add_global_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--version", action="version", version=f"laction-agent {__version__}")
+    p.add_argument("--config", help="Path config.yaml (default: ./config.yaml)")
+    p.add_argument("--home", help="Override LACTION_HOME (direktori profil/data)")
+    p.add_argument("--provider", choices=sorted(VALID_PROVIDERS), help="Override provider LLM")
+    p.add_argument("--model", help="Override nama model")
+    p.add_argument("--api-base", dest="api_base", help="Override base URL OpenAI-compatible")
+    p.add_argument("--api-key", dest="api_key", help="Override API key (lebih aman via env)")
+    p.add_argument("--approval-mode", choices=sorted(VALID_APPROVAL_MODES), help="smart | always | never")
+    p.add_argument("--max-iterations", type=int, help="Batas loop tool per turn")
+    p.add_argument("--context-limit", type=int, help="Batas token sebelum kompresi")
+    p.add_argument("--session", help="Pakai / lanjutkan session_id tertentu")
+    p.add_argument("-v", "--verbose", action="store_true", help="Log debug")
+
+
+def _new_parser(add_help: bool = True) -> argparse.ArgumentParser:
+    return argparse.ArgumentParser(
+        prog="laction",
+        description="Laction Agent — AI agent lokal, Hermes-inspired, zero-dependency.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=add_help,
+        epilog=(
+            "Contoh:\n"
+            "  laction \"list file\"\n"
+            "  laction \"ingat: saya suka kopi\"\n"
+            "  laction chat\n"
+            "  laction gateway --host 0.0.0.0 --port 8000\n\n"
+            "Tanpa argumen: masuk mode chat interaktif. Mode default = mock (tanpa API key)."
+        ),
+    )
+
+
+def _add_subcommands(p: argparse.ArgumentParser):
+    sub = p.add_subparsers(dest="command")
+
+    sub.add_parser("chat", help="Mode interaktif (REPL)")
+
+    run_p = sub.add_parser("run", help="Jalankan satu pesan lalu keluar")
+    run_p.add_argument("text", nargs="+", help="Pesan yang dikirim ke agent")
+
+    sub.add_parser("init", help="Inisialisasi profil: MEMORY.md, USER.md, sessions.db, skills/")
+
+    status_p = sub.add_parser("status", help="Tampilkan konfigurasi & state agent")
+    status_p.add_argument("--json", action="store_true", help="Output JSON")
+
+    tools_p = sub.add_parser("tools", help="Daftar tool yang terdaftar")
+    tools_p.add_argument("--json", action="store_true", help="Output JSON skema tools")
+
+    skills_p = sub.add_parser("skills", help="Daftar / lihat skill")
+    skills_p.add_argument("name", nargs="?", help="Nama skill untuk dilihat isinya")
+    skills_p.add_argument("--json", action="store_true", help="Output JSON")
+
+    mem_p = sub.add_parser("memory", help="Lihat / tambah memory")
+    mem_p.add_argument("action", nargs="?", default="show", choices=["show", "add", "user"])
+    mem_p.add_argument("note", nargs="*", help="Catatan untuk action add/user")
+
+    cron_p = sub.add_parser("cron", help="Kelola tugas terjadwal")
+    cron_sub = cron_p.add_subparsers(dest="cron_command")
+    cron_sub.add_parser("list", help="Daftar cron job")
+    cron_add = cron_sub.add_parser("add", help="Tambah cron job")
+    cron_add.add_argument("--name", required=True)
+    cron_add.add_argument("--task", required=True)
+    cron_add.add_argument("--interval", dest="interval_seconds", type=int, default=3600, help="Detik (min 10)")
+    cron_rm = cron_sub.add_parser("remove", help="Hapus cron job")
+    cron_rm.add_argument("--name", required=True)
+    cron_sub.add_parser("start", help="Jalankan scheduler di foreground")
+
+    gw_p = sub.add_parser("gateway", help="Jalankan UI chat + HTTP API")
+    gw_p.add_argument("--host", default="0.0.0.0", help="Default 0.0.0.0 (cocok untuk preview)")
+    gw_p.add_argument("--port", type=int, default=int(os.environ.get("LACTION_GATEWAY_PORT", "8000")))
+    gw_p.add_argument("--token", help="Token akses (default: LACTION_GATEWAY_TOKEN)")
+    gw_p.add_argument("--no-cron", action="store_true", help="Matikan scheduler cron")
+    gw_p.add_argument("--cron", action="store_true", help="Paksa scheduler cron aktif")
+
+    sub.add_parser("doctor", help="Cek kesehatan instalasi & konfigurasi")
+    return sub
+
+
+def build_message_parser() -> argparse.ArgumentParser:
+    """Parser untuk one-shot / REPL: tidak punya subcommand sama sekali."""
+    p = _new_parser()
+    _add_global_args(p)
+    p.add_argument("message", nargs="*", help="Pesan one-shot (jika tidak ada subcommand)")
+    return p
+
+
+def build_subcommand_parser() -> argparse.ArgumentParser:
+    """Parser untuk perintah eksplisit: tidak punya positional `message`."""
+    p = _new_parser()
+    _add_global_args(p)
+    _add_subcommands(p)
+    return p
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Parser gabungan untuk keperluan --help / inspeksi."""
+    p = _new_parser()
+    _add_global_args(p)
+    p.add_argument("message", nargs="*", help="Pesan one-shot (jika tidak ada subcommand)")
+    _add_subcommands(p)
+    return p
+
+
+_GLOBAL_OPTS_WITH_VALUE = {
+    "--config", "--home", "--provider", "--model", "--api-base", "--api-key",
+    "--approval-mode", "--max-iterations", "--context-limit", "--session",
+}
+_GLOBAL_FLAGS = {"-v", "--verbose", "--version"}
+
+
+def _hoist_global_options(raw: list[str]) -> list[str]:
+    """Pindahkan opsi global ke depan agar boleh ditulis sesudah subcommand.
+
+    Tanpa ini `laction status --home ./data` gagal, karena subparser tidak
+    mewarisi opsi root. Meng-copy opsi ke tiap subparser berisiko menimpa
+    nilai root dengan default `None`, jadi argv yang dirapikan saja.
+    `--help` sengaja dibiarkan di tempatnya supaya help subcommand tetap benar.
+    """
+    globals_: list[str] = []
+    rest: list[str] = []
+    i = 0
+    while i < len(raw):
+        token = raw[i]
+        if token in _GLOBAL_OPTS_WITH_VALUE:
+            globals_.append(token)
+            if i + 1 < len(raw):
+                globals_.append(raw[i + 1])
+                i += 1
+        elif any(token.startswith(opt + "=") for opt in _GLOBAL_OPTS_WITH_VALUE):
+            globals_.append(token)
+        elif token in _GLOBAL_FLAGS:
+            globals_.append(token)
+        else:
+            rest.append(token)
+        i += 1
+    return globals_ + rest
+
+
+def parse_args(argv: list[str] | None) -> argparse.Namespace:
+    """Router dua tahap: bedakan `laction list file` vs `laction status --json`.
+
+    Argparse tidak bisa dengan aman menggabungkan `message nargs='*'` dan
+    subparsers dalam satu parser (kata kedua pesan bisa tertukar jadi
+    subcommand). Kita rapikan opsi global, konsumsi lewat router, lalu pilih
+    parser yang tepat. Parser terpilih tetap memvalidasi ulang seluruh argv.
+    """
+    raw = _hoist_global_options(list(sys.argv[1:] if argv is None else argv))
+
+    router = argparse.ArgumentParser(add_help=False)
+    _add_global_args(router)
+    _ns, rest = router.parse_known_args(raw)
+
+    if "-h" in raw or "--help" in raw:
+        if rest and rest[0] in KNOWN_COMMANDS:
+            return build_subcommand_parser().parse_args(raw)
+        return build_message_parser().parse_args(raw)
+
+    if rest and rest[0] in KNOWN_COMMANDS:
+        return build_subcommand_parser().parse_args(raw)
+    if rest and rest[0].startswith("-"):
+        # Opsi tidak dikenal: biarkan parser pesan yang memberi error rapi.
+        return build_message_parser().parse_args(raw)
+
+    args = build_message_parser().parse_args(raw)
+    args.command = None
+    return args
+
+
+def resolve_config(args: argparse.Namespace) -> Config:
+    cfg = Config.load(args.config)
+    overrides = {
+        "home": args.home,
+        "provider": args.provider,
+        "model": args.model,
+        "api_base": args.api_base,
+        "api_key": args.api_key,
+        "approval_mode": args.approval_mode,
+        "max_iterations": args.max_iterations,
+        "context_limit": args.context_limit,
+    }
+    for attr, value in overrides.items():
+        if value is not None:
+            setattr(cfg, attr, value)
+    cfg.validate()
+    logging.getLogger().setLevel(logging.DEBUG if args.verbose else logging.INFO)
+    logging.getLogger("laction").setLevel(logging.DEBUG if args.verbose else logging.INFO)
+    return cfg
+
+
+def _approval_prompt(command: str) -> bool:
+    print(f"\n⚠️  Persetujuan diperlukan untuk menjalankan:\n    {command}")
+    try:
+        answer = input("    Jalankan? [y/N] ").strip().lower()
+    except EOFError:
+        return False
+    return answer in ("y", "ya", "yes")
+
+
+def make_agent(cfg: Config, args: argparse.Namespace, interactive: bool = False) -> AIAgent:
+    agent = AIAgent(
+        cfg,
+        session_id=getattr(args, "session", None) or None,
+        approve=_approval_prompt if interactive else None,
+    )
+    return agent
+
+
+def _print_banner(cfg: Config, agent: AIAgent):
+    print("🛰️  Laction Agent v" + __version__)
+    print(f"   provider={cfg.provider}  model={cfg.model}  session={agent.session_id}")
+    print(f"   home={Path(cfg.home).expanduser().resolve()}  tools={len(get_registry().schemas())}")
+    for warning in cfg.warnings():
+        print(f"   ⚠️  {warning}")
+    print("   Ketik /help, /tools, /skills, /memory, /status, /new, /exit")
+    print()
+
+
+def one_shot(cfg: Config, args: argparse.Namespace, text: str) -> int:
+    agent = make_agent(cfg, args)
+    print(agent.run(text))
+    return 0
+
+
+def interactive_chat(cfg: Config, args: argparse.Namespace) -> int:
+    agent = make_agent(cfg, args, interactive=True)
+    _print_banner(cfg, agent)
+
+    while True:
+        try:
+            line = input("🧑 kamu> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nSampai jumpa 👋")
+            return 0
+        if not line:
+            continue
+
+        low = line.lower()
+        if low in ("exit", "quit", "keluar", "/exit", "/quit"):
+            print("Sampai jumpa 👋")
+            return 0
+
+        if line.startswith("/"):
+            parts = line.split(maxsplit=1)
+            cmd = parts[0].lower()
+            rest = parts[1] if len(parts) > 1 else ""
+            if cmd == "/help":
+                print(
+                    "/help  /tools  /skills  /memory  /status  /session [id]  /new  /clear  "
+                    "/cron list  /exit\n"
+                    "Atau langsung ketik perintah biasa, mis: list file / ingat: saya suka kopi"
+                )
+            elif cmd == "/tools":
+                print(", ".join(get_registry().names()))
+            elif cmd == "/skills":
+                print("\n".join(f"- {s['name']}: {s['description']}" for s in agent.skills.list_skills()))
+            elif cmd == "/memory":
+                print(agent.memory.read_all())
+            elif cmd == "/status":
+                print(json.dumps(cfg.as_dict(), ensure_ascii=False, indent=2))
+                print(f"session={agent.session_id}  tools={len(get_registry().schemas())}")
+            elif cmd == "/session":
+                if rest:
+                    agent = AIAgent(cfg, session_id=rest.strip(), approve=_approval_prompt)
+                    print(f"Berpindah ke sesi {agent.session_id}")
+                else:
+                    print(f"Session saat ini: {agent.session_id}")
+            elif cmd in ("/new", "/clear"):
+                agent = AIAgent(cfg, approve=_approval_prompt)
+                print(f"Sesi baru: {agent.session_id}")
+            elif cmd == "/cron" and rest.strip() == "list":
+                jobs = CronScheduler(Path(cfg.home)).list_jobs()
+                print("\n".join(f"- {j['name']}: {j['task']} ({j['interval_seconds']}s)" for j in jobs) or "(kosong)")
+            else:
+                print(f"Perintah internal tidak dikenal: {cmd}. Ketik /help.")
+            continue
+
+        try:
+            reply = agent.run(line)
+        except Exception as e:  # noqa: BLE001
+            reply = f"ERROR: {e}"
+        print(f"\n🤖 laction> {reply}\n")
+    return 0
+
+
+def cmd_status(cfg: Config, args: argparse.Namespace) -> int:
+    home = Path(cfg.home).expanduser()
+    home.mkdir(parents=True, exist_ok=True)
+    mgr = MemoryManager(home)
+    db = SessionDB(home)
+    skills = SkillManager(home).list_skills()
+    tools = get_registry().schemas()
+    jobs = CronScheduler(home).list_jobs()
+    data = {
+        "version": __version__,
+        "config": cfg.as_dict(redact=True),
+        "home": str(home.resolve()),
+        "session_db": str((home / "sessions.db").resolve()),
+        "memory_bytes": len(mgr.read_memory()) + len(mgr.read_user()),
+        "skills": [s["name"] for s in skills],
+        "tools": [t["name"] for t in tools],
+        "cron_jobs": jobs,
+        "warnings": cfg.warnings(),
+        "db_sessions": len({r["session_id"] for r in db.search("", limit=1000)}),
+    }
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+    print(f"Laction Agent v{__version__} — status")
+    print(f"  Provider     : {cfg.provider} / {cfg.model}")
+    print(f"  API base     : {cfg.api_base or '(default provider)'}")
+    print(f"  API key      : {'tersedia' if cfg.api_key else '- (mode mock tidak butuh)'}")
+    print(f"  Home         : {home.resolve()}")
+    print(f"  Session DB   : {home / 'sessions.db'}")
+    print(f"  Memory       : {data['memory_bytes']} karakter")
+    print(f"  Skills       : {len(skills)} ({', '.join(data['skills']) or '-'})")
+    print(f"  Tools        : {len(tools)}")
+    print(f"  Cron jobs    : {len(jobs)}")
+    print(f"  Max iterasi  : {cfg.max_iterations} | context limit: {cfg.context_limit}")
+    print(f"  Approval     : {cfg.approval_mode}")
+    for w in cfg.warnings():
+        print(f"  ⚠️  {w}")
+    return 0
+
+
+def cmd_tools(args: argparse.Namespace) -> int:
+    tools = get_registry().schemas()
+    if args.json:
+        print(json.dumps(tools, ensure_ascii=False, indent=2))
+        return 0
+    for t in tools:
+        print(f"  {t['name']:<16} {t['description']}")
+    return 0
+
+
+def cmd_skills(cfg: Config, args: argparse.Namespace) -> int:
+    mgr = SkillManager(Path(cfg.home))
+    if args.name:
+        content = mgr.view_skill(args.name)
+        if content is None:
+            print(f"Skill tidak ditemukan: {args.name}", file=sys.stderr)
+            return 1
+        print(content)
+        return 0
+    skills = mgr.list_skills()
+    if args.json:
+        print(json.dumps(skills, ensure_ascii=False, indent=2))
+        return 0
+    for s in skills:
+        print(f"  {s['name']:<20} {s['description']}")
+    return 0
+
+
+def cmd_memory(cfg: Config, args: argparse.Namespace) -> int:
+    mgr = MemoryManager(Path(cfg.home))
+    if args.action == "show":
+        print(mgr.read_all())
+        return 0
+    note = " ".join(args.note).strip()
+    if not note:
+        print("Catatan tidak boleh kosong. Contoh: laction memory add saya suka kopi", file=sys.stderr)
+        return 2
+    if args.action == "user":
+        mgr.append_user(note)
+        print(f"Tersimpan ke USER.md: {note}")
+    else:
+        mgr.append_memory(note)
+        print(f"Tersimpan ke MEMORY.md: {note}")
+    return 0
+
+
+def cmd_init(cfg: Config, args: argparse.Namespace) -> int:
+    agent = make_agent(cfg, args)
+    home = Path(cfg.home).expanduser().resolve()
+    print(f"✅ Profil siap di {home}")
+    print(f"   session={agent.session_id}")
+    print("   dibuat: MEMORY.md, USER.md, sessions.db, skills/")
+    print("   skill bawaan: " + ", ".join(s["name"] for s in agent.skills.list_skills()))
+    return 0
+
+
+def _cron_scheduler(cfg: Config) -> CronScheduler:
+    def _run(task: str) -> str:
+        log.info("Cron run: %s", task[:80])
+        return AIAgent(cfg).run(f"[cron] {task}")
+
+    return CronScheduler(Path(cfg.home), on_run=_run)
+
+
+def cmd_cron(cfg: Config, args: argparse.Namespace) -> int:
+    sched = _cron_scheduler(cfg)
+    command = args.cron_command or "list"
+    if command == "list":
+        jobs = sched.list_jobs()
+        print("\n".join(f"- {j['name']}: {j['task']} (tiap {j['interval_seconds']}s)" for j in jobs) or "(tidak ada cron job)")
+        return 0
+    if command == "add":
+        sched.add_job(args.name, args.task, max(10, args.interval_seconds))
+        print(f"✅ Cron '{args.name}' ditambahkan.")
+        return 0
+    if command == "remove":
+        sched.remove_job(args.name)
+        print(f"🗑️  Cron '{args.name}' dihapus (bila ada).")
+        return 0
+    if command == "start":
+        jobs = sched.list_jobs()
+        print(f"⏰ Cron aktif di {Path(cfg.home).resolve()} — {len(jobs)} job. Ctrl+C untuk berhenti.")
+        sched.start()
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\nCron dihentikan.")
+        finally:
+            sched.stop()
+        return 0
+    print(f"Subcommand cron tidak dikenal: {command}", file=sys.stderr)
+    return 2
+
+
+def cmd_gateway(cfg: Config, args: argparse.Namespace) -> int:
+    if run_server is None:
+        print("Gateway tidak tersedia (import gagal).", file=sys.stderr)
+        return 1
+    if args.no_cron:
+        cfg.cron_enabled = False
+    if args.cron:
+        cfg.cron_enabled = True
+    token = args.token or os.environ.get("LACTION_GATEWAY_TOKEN") or None
+    try:
+        run_server(cfg, host=args.host, port=args.port, token=token)
+    except OSError as e:
+        print(f"Gagal bind {args.host}:{args.port}: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_doctor(cfg: Config) -> int:
+    checks: list[tuple[str, bool, str]] = []
+    checks.append(("Python >= 3.11", sys.version_info >= (3, 11), ".".join(map(str, sys.version_info[:3]))))
+    checks.append(("Config valid", True, cfg.provider))
+    checks.append(("Tool registry", len(get_registry().schemas()) >= 10, f"{len(get_registry().schemas())} tools"))
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            mgr = MemoryManager(home)
+            mgr.append_memory("doctor check")
+            db = SessionDB(home)
+            sid = db.new_session()
+            db.save(sid, "user", "doctor check")
+            ok_memory = "doctor check" in mgr.read_memory() and bool(db.search("doctor check"))
+            skills = SkillManager(home).list_skills()
+        checks.append(("Memory + SQLite", ok_memory, "MEMORY.md & sessions.db writable"))
+        checks.append(("Skill bawaan", len(skills) >= 4, f"{len(skills)} skill"))
+    except Exception as e:  # noqa: BLE001
+        checks.append(("Memory + SQLite", False, str(e)))
+        checks.append(("Skill bawaan", False, "gagal dibaca"))
+
+    checks.append(("Gateway module", run_server is not None, "laction_agent.gateway"))
+    if cfg.provider == "mock":
+        checks.append(("API key", True, "tidak dibutuhkan (mock)"))
+    else:
+        checks.append(("API key", bool(cfg.api_key), "tersedia" if cfg.api_key else "LACTION_API_KEY kosong"))
+
+    print("🩺 Laction Doctor")
+    failed = 0
+    for name, ok, detail in checks:
+        print(f"  {'✅' if ok else '❌'} {name:<20} {detail}")
+        failed += 0 if ok else 1
+    for w in cfg.warnings():
+        print(f"  ⚠️  {w}")
+    print("Semua check lulus." if failed == 0 else f"{failed} check gagal.")
+    return 0 if failed == 0 else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    try:
+        cfg = resolve_config(args)
+    except ValueError as e:
+        print(f"Konfigurasi error: {e}", file=sys.stderr)
+        return 2
+
+    try:
+        command = args.command
+        if command == "chat":
+            return interactive_chat(cfg, args)
+        if command == "run":
+            return one_shot(cfg, args, " ".join(args.text))
+        if command == "init":
+            return cmd_init(cfg, args)
+        if command == "status":
+            return cmd_status(cfg, args)
+        if command == "tools":
+            return cmd_tools(args)
+        if command == "skills":
+            return cmd_skills(cfg, args)
+        if command == "memory":
+            return cmd_memory(cfg, args)
+        if command == "cron":
+            return cmd_cron(cfg, args)
+        if command == "gateway":
+            return cmd_gateway(cfg, args)
+        if command == "doctor":
+            return cmd_doctor(cfg)
+        if args.message:
+            return one_shot(cfg, args, " ".join(args.message))
+        return interactive_chat(cfg, args)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
