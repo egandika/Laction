@@ -216,4 +216,4 @@ Catatan penting: **`MockProvider` bukan LLM**. Ia memetakan perintah Bahasa Indo
 
 Angka di §5 (47 test, 10 doctor check, 3 guard) adalah **status saat PR review #2** dan tetap mencatat verifikasi historisnya. Setelah review, permintaan lanjutan menambah 5 tools (`run_python`, `web_search`, `rag_search`, `apk_analyze`, `apk_extract`), provider alias Gemini, 9 skill bawaan, serta panduan planning/verifikasi dan batas katalog skill 2.200 karakter.
 
-Status kode terkini: **25 tools, 13 skill bawaan, 63 unittest lulus, doctor 12 check (5 guard keamanan), wheel memuat 13 SKILL.md**. Detail keputusan fitur yang dipilih/ditunda, sumber riset, dan batasan keamanan tersedia di [`SKILLS.md`](SKILLS.md).
+Status kode terkini: **33 tools, 16 skill bawaan, 129 unittest lulus, doctor 21 check (termasuk FTS5, `memory prune`, `tool_events`, sandbox backend, MCP stdio roundtrip), wheel memuat 16 SKILL.md**. Detail keputusan fitur yang dipilih/ditunda, sumber riset, dan batasan keamanan tersedia di [`SKILLS.md`](SKILLS.md).

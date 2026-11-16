@@ -29,7 +29,7 @@ Repo ini awalnya hanya berisi `README.md`, jadi saya rancang agent yang:
 | Reasoning | `providers/` (`mock`, OpenAI-compatible: OpenAI/OpenRouter/Gemini/Ollama/Nous) |
 | Memory | `memory/` (Tier 1 Markdown + Tier 2 SQLite + workspace BM25 RAG) |
 | Skill | `skills/` (`SKILL.md` bawaan + buatan agent) |
-| Execution | `tools/` (file, shell/Python, web search/fetch, local RAG, APK statis, memory/skill, cron, delegasi) |
+| Execution | `tools/` (file, shell/Python, web search/fetch, local RAG, APK statis, memory/skill, cron, delegasi, MCP) |
 
 Dokumen lanjutan:
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — desain mendalam, diagram Mermaid, trace satu turn.
@@ -98,11 +98,16 @@ laction 'evolusi: {"options":[{"name":"A","cost":1,"benefits":[2,3]}],"budget":1
 laction "list cron"
 laction "tambah cron harian | list file | 3600"
 
-laction chat                                # REPL interaktif (/help, /tools, /memory, /new, /exit)
+laction chat                                # REPL interaktif (/help, /tools, /memory, /traces, /new, /exit)
 laction status --json                       # inspeksi config & state
 laction tools --json                        # skema JSON semua tool
 laction skills code-review                  # lihat isi SKILL.md
 laction memory add "repo ini pakai stdlib"
+laction memory prune --max-entries 50 --max-chars 6000
+laction traces --limit 20                   # durasi & status tiap panggilan tool
+laction mcp add --name demo --command python3 --args -m laction_agent.mcp.demo_server
+laction mcp list | tools --name demo | remove --name demo
+laction --workspace /path/ke/proyek --sandbox-mode docker chat
 laction init                                # buat profil data
 laction cron list | add | remove | start
 laction gateway --host 0.0.0.0 --port 8000 # UI + API
@@ -116,7 +121,7 @@ laction gateway --host 0.0.0.0 --port 8000
 # buka http://localhost:8000  (atau URL preview 0.0.0.0 bila di sandbox)
 ```
 
-Endpoint: `GET /health`, `/config`, `/tools`, `/skills`, `/memory`, `/history?session_id=...`, `/cron`; `POST /chat`, `/cron`, `/memory`, `/reset`.
+Endpoint: `GET /health`, `/config`, `/tools`, `/skills`, `/memory`, `/history?session_id=...`, `/cron`, `/traces?session_id=...`, `/mcp`; `POST /chat`, `/cron`, `/memory` (termasuk `{"action":"prune"}`), `/reset`. UI punya tombol **Traces**, **MCP**, dan **Prune memory**.
 
 Contoh API:
 
@@ -197,8 +202,11 @@ Laction/
 │   ├── agent.py               # 🔁 loop utama + sub-agent delegation
 │   ├── gateway.py             # HTTP API + UI chat (stdlib http.server)
 │   ├── providers/             # BaseProvider + mock/OpenAI-compatible (termasuk Gemini)
-│   ├── tools/                 # registry + 29 tool (self-register via decorator)
-│   ├── memory/                # MemoryManager (Markdown) + SessionDB (SQLite)
+│   ├── team.py                # fan-out spesialis/debat + deadline wall-clock
+│   ├── sandbox.py             # DockerExecutor opsional (fail-closed)
+│   ├── mcp/                   # registry allowlist + klien JSON-RPC stdio + demo server
+│   ├── tools/                 # registry + 33 tool (self-register via decorator)
+│   ├── memory/                # MemoryManager (Markdown) + SessionDB (SQLite FTS5)
 │   ├── skills/                # SkillManager + 16 skill bawaan (SKILL.md)
 │   └── cron/                  # CronScheduler (cron.json + thread)
 └── tests/                     # unittest, juga bisa jalan via pytest
@@ -206,23 +214,25 @@ Laction/
 
 ---
 
-## 6. Daftar tool (29)
+## 6. Daftar tool (33)
 
 | Tool | Fungsi |
 |---|---|
 | `read_file`, `write_file`, `list_files`, `search_files` | Akses file workspace dengan guard path traversal |
-| `run_terminal` | Shell lokal 30 detik, selalu perlu approval eksplisit; bukan sandbox |
-| `run_python` | Runner kode Python, timeout 1–30 detik, **persetujuan eksplisit selalu**; bukan sandbox |
+| `run_terminal` | Shell 30 detik, selalu perlu approval eksplisit; lokal atau container Docker bila `sandbox_mode` aktif |
+| `run_python` | Runner kode Python, timeout 1–30 detik, **persetujuan eksplisit selalu**; lokal atau container Docker |
 | `web_search`, `web_fetch` | Pencarian DDG best-effort + baca halaman publik; pencarian mengirim query ke DDG |
 | `rag_search` | Retrieval lokal BM25 pada file teks, mengembalikan path/baris (bukan vector embeddings) |
 | `apk_analyze`, `apk_extract` | Triage APK read-only + ekstraksi satu entry terbatas; APK tidak dijalankan |
 | `memory_save`, `memory_read`, `user_save` | Tier-1 memory: `MEMORY.md` / `USER.md` |
-| `memory_search` | Tier-2: cari riwayat sesi di SQLite |
+| `memory_search` | Tier-2: cari riwayat sesi di SQLite (FTS5 + ranking BM25, fallback `LIKE`) |
+| `memory_prune` | Pangkas + deduplikasi `MEMORY.md`/`USER.md`, simpan entri terbaru |
 | `list_skills`, `view_skill`, `create_skill` | Procedural memory / self-improvement |
 | `delegate_task`, `consult_team` | Sub-agent read-only; tim spesialis (`apk`/`research`/`report`) atau debat 1-putaran (`pro`/`contra`) + reviewer, bukan sandbox |
 | `device_health` | RAM dan storage read-only |
 | `simulate_files`, `evolve_plan` | Dunia file virtual in-memory dan simulasi evolusi numerik terbatas; tidak menerapkan perubahan |
 | `cron_add`, `cron_list`, `cron_remove` | Jadwal berulang |
+| `mcp_list_servers`, `mcp_list_tools`, `mcp_call` | Klien MCP `stdio` dengan allowlist eksplisit; `mcp_call` selalu perlu approval |
 | `get_time`, `list_tools`, `agent_info` | Utilitas sistem |
 
 Tool mendaftar sendiri lewat `@reg.register(...)`. Menambah tool = tulis satu fungsi + skema JSON, tidak perlu menyentuh `agent.py`.
@@ -242,7 +252,7 @@ tugas selesai
 
 Skill baru memerlukan approval eksplisit dan tidak boleh menimpa skill yang sudah ada. Ini prosedur tertulis, bukan pelatihan model atau kode yang otomatis teruji.
 
-Skill bawaan (13): `repo-onboarding`, `code-review`, `release-notes`, `self-improvement`, `planning`, `reflection`, `python-debugging`, `git-workflow`, `android-apk-static-analysis`, `local-rag`, `public-web-research`, `provider-setup`, `productivity-workflows`.
+Skill bawaan (16): `repo-onboarding`, `code-review`, `release-notes`, `self-improvement`, `planning`, `reflection`, `python-debugging`, `git-workflow`, `android-apk-static-analysis`, `local-rag`, `public-web-research`, `provider-setup`, `productivity-workflows`, `adversarial-thinking`, `structured-reflexion`, `verification-cove`.
 
 `SKILL.md` memakai frontmatter `name` + `description` mengikuti [Agent Skills spec](https://agentskills.io/specification): katalog ringkas dimuat saat sesi, isi lengkap dibaca via `view_skill` bila diperlukan. Skill bawaan divalidasi namanya/frontmatter-nya oleh test.
 
@@ -250,17 +260,22 @@ Skill bawaan (13): `repo-onboarding`, `code-review`, `release-notes`, `self-impr
 
 ## 8. Keamanan
 
-- **Workspace guard**: `read_file`/`write_file`/`list_files` menolak path yang `.resolve()` keluar dari workspace.
+- **Workspace eksplisit**: root file tools ditentukan `--workspace` > `LACTION_WORKSPACE` > `cfg.workspace` > `cwd` saat proses mulai. `read_file`/`write_file`/`list_files`/`rag_search` menolak path yang `.resolve()` keluar dari root tersebut.
+- **File kontrol dilindungi**: `write_file` menolak menimpa `mcp_servers.json`, `cron.json`, dan `SKILL.md`; perubahan hanya lewat tool/perintah yang punya validasi + approval.
 - **Approval mode**:
   - `smart` (default) dan `always`: semua `run_terminal`, `run_python`, dan `create_skill` perlu persetujuan eksplisit.
   - `never`: shell, Python dan pembuatan skill tidak dijalankan.
 - **Deteksi perintah berbahaya** mencakup rangkaian `;`, `&&`, `||`, `|`, substitusi `$(...)` dan backtick — bukan cuma kata pertama.
 - **SSRF guard**: `web_fetch` menolak loopback/private/link-local/`localhost`/`.internal`, termasuk hasil DNS. Opt-out: `LACTION_ALLOW_PRIVATE_WEB=1`.
 - **Web search**: `web_search` memakai HTML DuckDuckGo yang tidak resmi, bisa rate-limit/berubah; query dikirim ke pihak ketiga. Pola credential umum ditolak, tetapi jangan kirim secret/data privat.
-- **Python runner**: `run_python` tidak memakai shell tetapi tetap arbitrary code dengan hak user, bukan sandbox; selalu fail-closed tanpa approval interaktif.
+- **Python runner**: `run_python` tidak memakai shell, tetapi pada `sandbox_mode=none` tetap arbitrary code dengan hak user; selalu fail-closed tanpa approval interaktif.
+- **Sandbox Docker opsional** (`LACTION_SANDBOX_MODE=none|auto|docker`): `DockerExecutor` menjalankan shell/Python di container `--network none`, root `--read-only`, `/tmp` `noexec,nosuid,size=64m`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--pids-limit 64`, `--memory 256m`, `--cpus 1.0`, user `65534:65534`, hanya workspace yang di-mount (`ro`). Mode `docker` **fail-closed** bila binary/ daemon Docker tidak siap; mode `auto` turun ke eksekusi lokal. Container tetap berbagi kernel host dan workspace `ro` masih bisa dibaca, jadi approval tetap wajib.
+- **MCP allowlist**: hanya server di `<LACTION_HOME>/mcp_servers.json` yang bisa dijalankan (tidak ada auto-discovery). Klien `stdio` memakai JSON-RPC 2.0, frame maks 1 MiB, timeout wall-clock, dan environment yang diwarisi hanya `PATH`/`HOME`/`LANG` + env server eksplisit (`LACTION_API_KEY` tidak bocor ke proses anak). `mcp_call` di luar `READ_ONLY_TOOLS` dan butuh approval.
+- **Team deadline**: `consult_team` punya batas wall-clock total (`LACTION_TEAM_TIMEOUT`, default 45 detik, bisa ditimpa `timeout_seconds`); worker yang lewat batas dibatalkan dan hasilnya ditandai `TIMEOUT`.
 - **APK tools**: `apk_analyze` hanya membaca ZIP/AXML/strings dengan batas ukuran, `apk_extract` menulis satu entry ke workspace; tidak menjalankan APK dan bukan pengganti audit penuh.
 - **RAG**: `rag_search` hanya file teks lokal yang diizinkan, mengecualikan `data/`, hidden dirs, `.git`, virtualenv, dan output build; retrieval BM25 leksikal, bukan vector.
-- **Redaksi secret**: token `sk-*`, `ghp_*`, `github_pat_*`, `xox*-*`, `AKIA...`, `AIza*`, `Bearer ...`, dan `api_key=...` disamarkan sebelum masuk log, `sessions.db`, `MEMORY.md`, `USER.md`, maupun `SKILL.md`.
+- **Redaksi secret terpusat**: token `sk-*`, `ghp_*`, `github_pat_*`, `xox*-*`, `AKIA...`, `AIza*`, `Bearer ...`, dan `api_key=...` disamarkan di dalam `MemoryManager`/`SessionDB`, jadi semua pintu masuk (tool, `laction memory add`, `POST /memory` gateway) ikut tersanitasi.
+- **Batas ukuran memory**: `MEMORY.md`/`USER.md` dipangkas otomatis saat append melewati 32.000 karakter, dan `laction memory prune` / `POST /memory {"action":"prune"}` bisa memangkas eksplisit ke N entri & M karakter (entri terbaru dan duplikat ditangani).
 - **Batas konteks**: memory yang disuntik ke system prompt dibatasi 6.000 karakter terbaru; katalog skill maks 40 entri dan 2.200 karakter.
 - **Penanganan error tool** (bukan sandbox): exception di tool diubah jadi string `{"error": ...}`, agent tetap hidup.
 - **Provider error** ditangkap dan di-redaksi, tidak membocorkan API key ke log.
@@ -280,9 +295,9 @@ pip install -e ".[dev]"
 python3 -m pytest -q
 ```
 
-**79 test** mencakup config/provider (termasuk Gemini), tool registry, file guard, loop mock, memory, skills, delegasi, context compressor, CLI/gateway, Python approval, BM25 RAG, parser DuckDuckGo, APK text/binary AXML + zip-slip guard, routing mock, dan regresi keamanan (`tests/test_review_fixes.py`, `tests/test_added_capabilities.py`, `tests/test_agentic_workflows.py`).
+**129 test** mencakup config/provider (termasuk Gemini), tool registry, file guard, loop mock, memory, skills, delegasi, context compressor, CLI/gateway, Python approval, BM25 RAG, parser DuckDuckGo, APK text/binary AXML + zip-slip guard, routing mock, serta paket terbaru: FTS5 + `prune` + redaksi terpusat, `tool_events`/metrics, workspace eksplisit, flag `DockerExecutor`, deadline tim, dan roundtrip MCP stdio (`tests/test_next_packages.py`).
 
-`laction doctor` juga memverifikasi 5 guard keamanan (redaksi, terminal, SSRF, approval Python, path RAG).
+`laction doctor` juga memverifikasi guard keamanan & kemampuan baru: redaksi, terminal chain/substitusi, SSRF, approval Python, path RAG, FTS5, `memory prune`, redaksi memory, `tool_events`, workspace eksplisit, backend sandbox, registry MCP, dan roundtrip server MCP demo.
 
 CI GitHub Actions (`.github/workflows/ci.yml`) otomatis jalan di **Python 3.11 / 3.12 / 3.13** untuk setiap push & pull request: compile, unittest, `doctor`, editable install, smoke test entry point `laction`, dan smoke test HTTP gateway.
 
@@ -290,14 +305,14 @@ CI GitHub Actions (`.github/workflows/ci.yml`) otomatis jalan di **Python 3.11 /
 
 ## 10. Batasan & roadmap
 
-Belum ada (sengaja, supaya inti tetap ringan): MCP client/server, Honcho/remote memory, vector embeddings, optimisasi skill DSPy/GEPA, backend sandbox Docker/SSH/Modal, adapter WhatsApp/Telegram, multi-user auth, analisis APK dinamis (Frida/Logcat), YouTube transcript, image generation/analysis, dan speech-to-text/text-to-speech. Daftar keputusan + alasan ada di [`docs/SKILLS.md`](docs/SKILLS.md); risiko residual keamanan ada di [`docs/REVIEW.md`](docs/REVIEW.md) §6.
+Belum ada (sengaja, supaya inti tetap ringan): MCP di atas transport HTTP/SSE, Honcho/remote memory, vector embeddings, optimisasi skill DSPy/GEPA, backend sandbox SSH/Modal, adapter WhatsApp/Telegram, multi-user auth, analisis APK dinamis (Frida/Logcat), YouTube transcript, image generation/analysis, dan speech-to-text/text-to-speech. Daftar keputusan + alasan ada di [`docs/SKILLS.md`](docs/SKILLS.md); risiko residual keamanan ada di [`docs/REVIEW.md`](docs/REVIEW.md) §6.
 
 Rencana lanjutan paling masuk akal (berurutan sesuai prioritas review):
 
-1. **Sandbox eksekusi** (`DockerExecutor`) — penting sebelum memasang LLM sungguhan.
-2. FTS5 asli untuk `memory_search` + `memory prune` (saat ini `LIKE`, dan `MEMORY.md` append-only).
-3. Observability tool: simpan nama/durasi/exit code terstruktur, bukan string di `messages.content`.
-4. `SubagentPool` paralel dengan batas konkurensi + timeout.
+1. **Sandbox produksi**: `gVisor`/`Firecracker` atau seccomp profile kustom di atas `DockerExecutor`; saat ini container berbagi kernel host.
+2. **Observability lanjutan**: agregasi `tool_events` lintas sesi, alerting, dan ekspor OpenTelemetry (sekarang tabel lokal + `laction traces` + `GET /traces`).
+3. **MCP lebih luas**: transport HTTP/SSE, OAuth, serta allowlist per-tool (sekarang per-server, stdio saja).
+4. **Subagent pool** dengan batas konkurensi adaptif; deadline wall-clock sudah ada di `team.py`.
 5. `MCPClient` + tool discovery dinamis, lalu gateway adapter (webhook).
 
 ---

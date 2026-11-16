@@ -1,12 +1,13 @@
-"""Tool terminal: jalankan perintah shell dengan approval & timeout."""
+"""Tool terminal: jalankan perintah shell dengan approval, timeout, & DockerExecutor opsional."""
 from __future__ import annotations
 
 import re
 import subprocess
-from pathlib import Path
 
-from .registry import get_registry
+from ..sandbox import DEFAULT_DOCKER_IMAGE, DockerExecutor, resolve_execution_backend
+from . import file_tools
 from .python_tool import _approval_display
+from .registry import get_registry
 
 # Frasa berbahaya. Dicek sebagai token utuh di seluruh command, bukan cuma
 # di awal string — supaya `echo aman; rm -rf /tmp/x` tidak lolos.
@@ -43,29 +44,52 @@ reg = get_registry()
 
 @reg.register(
     "run_terminal",
-    "Jalankan perintah shell (mis. ls, python, git). Timeout 30 detik.",
+    "Jalankan perintah shell (mis. ls, python, git). Timeout 30 detik; selalu perlu approval.",
     {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
     dangerous=True,
 )
 def run_terminal(command: str, context: dict) -> str:
     context = context or {}
-    mode = context.get("approval_mode", "smart")
+    cfg = context.get("cfg")
+    mode = context.get("approval_mode", getattr(cfg, "approval_mode", "smart"))
+    sandbox_mode = context.get("sandbox_mode", getattr(cfg, "sandbox_mode", "none"))
+    docker_image = getattr(cfg, "docker_image", DEFAULT_DOCKER_IMAGE)
     approve = context.get("approve")
     dangerous = _is_dangerous(command)
 
     if mode == "never":
         return "DITOLAK: semua perintah shell diblokir (approval_mode=never)."
 
+    backend, err = resolve_execution_backend(sandbox_mode)
+    if backend == "blocked":
+        return err
+
     if approve is None:
         return "PERLU APPROVAL: shell tidak dijalankan otomatis. Pakai CLI interaktif untuk meninjau perintah."
     try:
         warning = " [terdeteksi berbahaya]" if dangerous else ""
-        if not approve(f"Shell bukan sandbox{warning}:\n{_approval_display(command)}"):
+        label = (
+            f"Shell via Docker container (--network none, ro workspace){warning}"
+            if backend == "docker"
+            else f"Shell bukan sandbox{warning}"
+        )
+        if not approve(f"{label}:\n{_approval_display(command)}"):
             return "DITOLAK: user tidak menyetujui perintah."
     except Exception as e:  # noqa: BLE001
         return f"DITOLAK: gagal meminta approval: {e}"
 
+    ws = file_tools.get_workspace(context)
     try:
+        if backend == "docker":
+            proc = DockerExecutor(docker_image).run(
+                ["sh", "-c", command],
+                workspace=ws,
+                timeout=30,
+                writable=False,
+            )
+            out = (proc.stdout or "") + (proc.stderr or "")
+            return f"[backend=docker exit={proc.returncode}]\n{out.strip() or '(tidak ada output)'}"
+
         proc = subprocess.run(
             command,
             shell=True,
@@ -73,7 +97,7 @@ def run_terminal(command: str, context: dict) -> str:
             capture_output=True,
             text=True,
             timeout=30,
-            cwd=Path.cwd(),
+            cwd=ws,
         )
         out = (proc.stdout or "") + (proc.stderr or "")
         return f"[exit={proc.returncode}]\n{out.strip() or '(tidak ada output)'}"

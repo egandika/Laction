@@ -49,9 +49,7 @@ def _tokens(text: str) -> list[str]:
     return [term.casefold() for term in _TOKEN_RE.findall(text) if term.casefold() not in _STOPWORDS]
 
 
-def _iter_files(root: Path):
-    workspace = file_tools.WORKSPACE.resolve()
-
+def _iter_files(root: Path, workspace: Path):
     def acceptable(path: Path) -> bool:
         try:
             if path.is_symlink() or not path.is_file() or path.suffix.lower() not in TEXT_SUFFIXES:
@@ -110,12 +108,11 @@ def _split_file(path: Path, text: str) -> list[tuple[int, int, str]]:
     return chunks
 
 
-def _collect(root: Path) -> tuple[list[_Chunk], bool]:
+def _collect(root: Path, workspace: Path) -> tuple[list[_Chunk], bool]:
     chunks: list[_Chunk] = []
     total_bytes = 0
     limited = False
-    workspace = file_tools.WORKSPACE.resolve()
-    for path in _iter_files(root):
+    for path in _iter_files(root, workspace):
         try:
             size = path.stat().st_size
             if total_bytes + size > MAX_TOTAL_BYTES:
@@ -183,19 +180,20 @@ def rag_search(query: str, path: str = ".", limit: int = 5, context: dict | None
     terms = list(dict.fromkeys(_tokens(query)))
     if not terms:
         return "Query tidak memiliki kata yang dapat dicari."
+    workspace = file_tools.get_workspace(context)
     try:
-        root = file_tools._safe(path or ".")
+        root = file_tools._safe(path or ".", context)
     except ValueError as exc:
         return f"DITOLAK: {exc}"
     if not root.exists() or not (root.is_dir() or root.is_file()):
         return f"Path tidak ditemukan: {path}"
     try:
-        relative_root = root.resolve().relative_to(file_tools.WORKSPACE.resolve())
+        relative_root = root.resolve().relative_to(workspace)
     except ValueError:
         return f"DITOLAK: path keluar dari workspace: {path}"
     if any(part.startswith(".") or part.lower() in SKIP_PARTS for part in relative_root.parts):
         return f"Path dikecualikan dari retrieval lokal: {path}"
-    chunks, limited = _collect(root)
+    chunks, limited = _collect(root, workspace)
     results = _bm25(chunks, terms)[: min(max(int(limit), 1), 10)]
     if not results:
         return f"Tidak ada potongan lokal yang cocok untuk: {query}"

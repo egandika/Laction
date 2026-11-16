@@ -27,10 +27,13 @@ except ImportError:
 from . import __version__
 from .agent import AIAgent
 from .policies import READ_ONLY_TOOLS
-from .config import Config, VALID_APPROVAL_MODES, VALID_PROVIDERS
+from .config import Config, VALID_APPROVAL_MODES, VALID_PROVIDERS, VALID_SANDBOX_MODES
 from .cron.scheduler import CronScheduler
+from .mcp.client import MCPError, MCPStdioClient
+from .mcp.registry import MCPRegistry
 from .memory.manager import MemoryManager
 from .memory.session_db import SessionDB
+from .sandbox import DockerExecutor, resolve_execution_backend
 from .skills.manager import SkillManager
 from .tools.registry import get_registry
 from .tools.terminal_tool import _is_dangerous
@@ -43,7 +46,8 @@ except ImportError:  # pragma: no cover — hanya bila gateway belum ada
     run_server = None  # type: ignore[assignment]
 
 KNOWN_COMMANDS = {
-    "chat", "run", "init", "status", "tools", "skills", "memory", "cron", "gateway", "doctor"
+    "chat", "run", "init", "status", "tools", "skills", "memory", "cron", "gateway",
+    "doctor", "traces", "mcp",
 }
 
 
@@ -56,6 +60,8 @@ def _add_global_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--api-base", dest="api_base", help="Override base URL OpenAI-compatible")
     p.add_argument("--api-key", dest="api_key", help="Override API key (lebih aman via env)")
     p.add_argument("--approval-mode", choices=sorted(VALID_APPROVAL_MODES), help="smart | always | never")
+    p.add_argument("--workspace", help="Override LACTION_WORKSPACE (root file tools)")
+    p.add_argument("--sandbox-mode", choices=sorted(VALID_SANDBOX_MODES), help="none | auto | docker")
     p.add_argument("--max-iterations", type=int, help="Batas loop tool per turn")
     p.add_argument("--context-limit", type=int, help="Batas token sebelum kompresi")
     p.add_argument("--session", help="Pakai / lanjutkan session_id tertentu")
@@ -99,9 +105,36 @@ def _add_subcommands(p: argparse.ArgumentParser):
     skills_p.add_argument("name", nargs="?", help="Nama skill untuk dilihat isinya")
     skills_p.add_argument("--json", action="store_true", help="Output JSON")
 
-    mem_p = sub.add_parser("memory", help="Lihat / tambah memory")
-    mem_p.add_argument("action", nargs="?", default="show", choices=["show", "add", "user"])
+    mem_p = sub.add_parser("memory", help="Lihat / tambah / pangkas memory")
+    mem_p.add_argument("action", nargs="?", default="show", choices=["show", "add", "user", "prune"])
     mem_p.add_argument("note", nargs="*", help="Catatan untuk action add/user")
+    mem_p.add_argument("--max-entries", dest="max_entries", type=int, default=50, help="Batas entri terbaru per file (prune)")
+    mem_p.add_argument("--max-chars", dest="max_chars", type=int, default=6000, help="Batas karakter per file (prune)")
+    mem_p.add_argument("--target", choices=["all", "memory", "user"], default="all", help="File yang dipangkas")
+
+    traces_p = sub.add_parser("traces", help="Lihat jejak eksekusi tool (observability)")
+    traces_p.add_argument("--session", dest="traces_session", help="Filter session_id")
+    traces_p.add_argument("--limit", type=int, default=20, help="Jumlah event terbaru (default 20)")
+    traces_p.add_argument("--json", action="store_true", help="Output JSON")
+
+    mcp_p = sub.add_parser("mcp", help="Kelola server MCP (allowlist eksplisit)")
+    mcp_sub = mcp_p.add_subparsers(dest="mcp_command")
+    mcp_sub.add_parser("list", help="Daftar server terdaftar")
+    mcp_add = mcp_sub.add_parser("add", help="Tambah server MCP")
+    mcp_add.add_argument("--name", required=True)
+    # dest eksplisit: `--command` tidak boleh menimpa dest subcommand `command`.
+    mcp_add.add_argument("--command", dest="mcp_server_command", required=True)
+    mcp_add.add_argument(
+        "--args",
+        nargs=argparse.REMAINDER,
+        default=[],
+        help="Argumen command (taruh paling akhir; boleh mengandung tanda '-')",
+    )
+    mcp_add.add_argument("--description", default="")
+    mcp_rm = mcp_sub.add_parser("remove", help="Hapus server MCP")
+    mcp_rm.add_argument("--name", required=True)
+    mcp_tools = mcp_sub.add_parser("tools", help="Daftar tool pada satu server (menjalankannya sementara)")
+    mcp_tools.add_argument("--name", required=True)
 
     cron_p = sub.add_parser("cron", help="Kelola tugas terjadwal")
     cron_sub = cron_p.add_subparsers(dest="cron_command")
@@ -153,6 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
 _GLOBAL_OPTS_WITH_VALUE = {
     "--config", "--home", "--provider", "--model", "--api-base", "--api-key",
     "--approval-mode", "--max-iterations", "--context-limit", "--session",
+    "--workspace", "--sandbox-mode",
 }
 _GLOBAL_FLAGS = {"-v", "--verbose", "--version"}
 
@@ -226,6 +260,8 @@ def resolve_config(args: argparse.Namespace) -> Config:
         "approval_mode": args.approval_mode,
         "max_iterations": args.max_iterations,
         "context_limit": args.context_limit,
+        "workspace": getattr(args, "workspace", None),
+        "sandbox_mode": getattr(args, "sandbox_mode", None),
     }
     for attr, value in overrides.items():
         if value is not None:
@@ -258,9 +294,10 @@ def _print_banner(cfg: Config, agent: AIAgent):
     print("🛰️  Laction Agent v" + __version__)
     print(f"   provider={cfg.provider}  model={cfg.model}  session={agent.session_id}")
     print(f"   home={Path(cfg.home).expanduser().resolve()}  tools={len(get_registry().schemas())}")
+    print(f"   workspace={Path(cfg.workspace or Path.cwd()).expanduser().resolve()}  sandbox={cfg.sandbox_mode}")
     for warning in cfg.warnings():
         print(f"   ⚠️  {warning}")
-    print("   Ketik /help, /tools, /skills, /memory, /status, /new, /exit")
+    print("   Ketik /help, /tools, /skills, /memory, /traces, /status, /new, /exit")
     print()
 
 
@@ -294,7 +331,7 @@ def interactive_chat(cfg: Config, args: argparse.Namespace) -> int:
             rest = parts[1] if len(parts) > 1 else ""
             if cmd == "/help":
                 print(
-                    "/help  /tools  /skills  /memory  /status  /session [id]  /new  /clear  "
+                    "/help  /tools  /skills  /memory  /traces  /status  /session [id]  /new  /clear  "
                     "/cron list  /exit\n"
                     "Atau langsung ketik perintah biasa, mis: list file / ingat: saya suka kopi"
                 )
@@ -304,6 +341,8 @@ def interactive_chat(cfg: Config, args: argparse.Namespace) -> int:
                 print("\n".join(f"- {s['name']}: {s['description']}" for s in agent.skills.list_skills()))
             elif cmd == "/memory":
                 print(agent.memory.read_all())
+            elif cmd == "/traces":
+                _print_traces(agent.db, session_id=agent.session_id, limit=15)
             elif cmd == "/status":
                 print(json.dumps(cfg.as_dict(), ensure_ascii=False, indent=2))
                 print(f"session={agent.session_id}  tools={len(get_registry().schemas())}")
@@ -350,6 +389,10 @@ def cmd_status(cfg: Config, args: argparse.Namespace) -> int:
         "cron_jobs": jobs,
         "warnings": cfg.warnings(),
         "db_sessions": len({r["session_id"] for r in db.search("", limit=1000)}),
+        "workspace": str(Path(cfg.workspace).expanduser().resolve()) if cfg.workspace else str(Path.cwd().resolve()),
+        "sandbox_mode": cfg.sandbox_mode,
+        "tool_metrics": db.tool_metrics(),
+        "mcp_servers": [s["name"] for s in MCPRegistry(home).list_servers()],
     }
     if args.json:
         print(json.dumps(data, ensure_ascii=False, indent=2))
@@ -365,7 +408,12 @@ def cmd_status(cfg: Config, args: argparse.Namespace) -> int:
     print(f"  Tools        : {len(tools)}")
     print(f"  Cron jobs    : {len(jobs)}")
     print(f"  Max iterasi  : {cfg.max_iterations} | context limit: {cfg.context_limit}")
+    print(f"  Workspace    : {data['workspace']}")
+    print(f"  Sandbox      : {cfg.sandbox_mode}")
     print(f"  Approval     : {cfg.approval_mode}")
+    metrics = data["tool_metrics"]
+    print(f"  Tool events  : {metrics['total_calls']} panggilan (avg {metrics['avg_duration_ms']} ms)")
+    print(f"  MCP servers  : {len(data['mcp_servers'])} ({', '.join(data['mcp_servers']) or '-'})")
     for w in cfg.warnings():
         print(f"  ⚠️  {w}")
     return 0
@@ -404,17 +452,137 @@ def cmd_memory(cfg: Config, args: argparse.Namespace) -> int:
     if args.action == "show":
         print(mgr.read_all())
         return 0
+    if args.action == "prune":
+        try:
+            stats = mgr.prune(
+                max_entries=getattr(args, "max_entries", 50),
+                max_chars=getattr(args, "max_chars", 6000),
+                target=getattr(args, "target", "all"),
+            )
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 2
+        print(f"🧹 Memory dipangkas ({stats['target']}): "
+              f"{stats['before_chars']} → {stats['after_chars']} karakter, "
+              f"{stats['removed_entries']} entri dibuang/diduplikasi.")
+        for name, detail in stats["files"].items():
+            print(f"   {name:<7} {detail['before_entries']} → {detail['after_entries']} entri")
+        return 0
     note = " ".join(args.note).strip()
     if not note:
         print("Catatan tidak boleh kosong. Contoh: laction memory add saya suka kopi", file=sys.stderr)
         return 2
     if args.action == "user":
-        mgr.append_user(note)
-        print(f"Tersimpan ke USER.md: {note}")
+        stored = mgr.append_user(note)
     else:
-        mgr.append_memory(note)
-        print(f"Tersimpan ke MEMORY.md: {note}")
+        stored = mgr.append_memory(note)
+    target_file = "USER.md" if args.action == "user" else "MEMORY.md"
+    if not stored:
+        print("Catatan tidak boleh kosong.", file=sys.stderr)
+        return 2
+    flag = " [kredensial disamarkan]" if stored != " ".join(note.splitlines()).strip() else ""
+    print(f"Tersimpan ke {target_file}: {stored}{flag}")
     return 0
+
+
+def _print_traces(db: SessionDB, session_id: str | None = None, limit: int = 20) -> None:
+    metrics = db.tool_metrics(session_id)
+    events = db.tool_events(session_id, limit=limit)
+    print(
+        f"📊 Tool events: {metrics['total_calls']} total, avg {metrics['avg_duration_ms']} ms, "
+        f"max {metrics['max_duration_ms']} ms"
+    )
+    if metrics["by_status"]:
+        print("   status: " + ", ".join(f"{k}={v}" for k, v in sorted(metrics["by_status"].items())))
+    if metrics["by_tool"]:
+        print("   per tool:")
+        for row in metrics["by_tool"][:10]:
+            print(f"     - {row['tool']:<18} {row['calls']:>3}x  avg {row['avg_ms']} ms  non-ok {row['non_ok']}")
+    if not events:
+        print("   (belum ada event)")
+        return
+    print("   event terbaru:")
+    for ev in events:
+        print(f"     [{ev['created_at']}] {ev['tool_name']:<18} {ev['status']:<16} {ev['duration_ms']:>5} ms")
+
+
+def cmd_traces(cfg: Config, args: argparse.Namespace) -> int:
+    db = SessionDB(Path(cfg.home).expanduser())
+    sid = getattr(args, "traces_session", None) or getattr(args, "session", None) or None
+    limit = max(1, min(int(getattr(args, "limit", 20) or 20), 200))
+    if args.json:
+        print(json.dumps({
+            "session_id": sid,
+            "metrics": db.tool_metrics(sid),
+            "events": db.tool_events(sid, limit=limit),
+        }, ensure_ascii=False, indent=2))
+        return 0
+    _print_traces(db, session_id=sid, limit=limit)
+    return 0
+
+
+def cmd_mcp(cfg: Config, args: argparse.Namespace) -> int:
+    registry = MCPRegistry(Path(cfg.home).expanduser())
+    command = getattr(args, "mcp_command", None) or "list"
+
+    if command == "list":
+        servers = registry.list_servers()
+        if not servers:
+            print(f"Belum ada server MCP. File: {registry.path}")
+            print("Contoh: laction mcp add --name demo --command python3 "
+                  "--args -m laction_agent.mcp.demo_server")
+            return 0
+        for server in servers:
+            state = "enabled" if server["enabled"] else "disabled"
+            print(f"  {server['name']:<12} [{state}] {server['command']} {' '.join(server['args'])}")
+            if server.get("description"):
+                print(f"               {server['description']}")
+        print(f"File: {registry.path}")
+        return 0
+
+    if command == "add":
+        try:
+            server = registry.add_server(
+                name=args.name,
+                command=args.mcp_server_command,
+                args=getattr(args, "args", []) or [],
+                description=getattr(args, "description", "") or "",
+            )
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 2
+        print(f"✅ Server MCP '{server['name']}' ditambahkan ({server['command']}).")
+        print("   Tool MCP tetap memerlukan approval setiap pemanggilan.")
+        return 0
+
+    if command == "remove":
+        removed = registry.remove_server(args.name)
+        print(f"🗑️  Server MCP '{args.name}' {'dihapus' if removed else 'tidak ditemukan'}.")
+        return 0 if removed else 1
+
+    if command == "tools":
+        server = registry.get(args.name)
+        if server is None:
+            print(f"Server MCP tidak ditemukan: {args.name}", file=sys.stderr)
+            return 1
+        if not server["enabled"]:
+            print(f"Server MCP '{args.name}' dinonaktifkan.", file=sys.stderr)
+            return 1
+        try:
+            with MCPStdioClient(server["command"], server["args"], server["env"], timeout=20) as client:
+                info = client.initialize()
+                tools = client.list_tools()
+        except MCPError as e:
+            print(f"ERROR MCP: {e}", file=sys.stderr)
+            return 1
+        print(f"Server {server['name']} — {info.get('serverInfo', {}).get('name', '?')} "
+              f"(protocol {info.get('protocolVersion')})")
+        for tool in tools:
+            print(f"  {tool['name']:<20} {tool['description']}")
+        return 0
+
+    print(f"Subcommand mcp tidak dikenal: {command}", file=sys.stderr)
+    return 2
 
 
 def cmd_init(cfg: Config, args: argparse.Namespace) -> int:
@@ -527,9 +695,95 @@ def cmd_doctor(cfg: Config) -> int:
     python_guard = get_registry().call(
         "run_python", {"code": "print('doctor')"}, context={"approval_mode": "smart"}
     )
-    checks.append(("Python approval", "PERLU APPROVAL" in python_guard, "arbitrary code fail-closed tanpa callback"))
+    checks.append(("Python approval", "PERLU APPROVAL" in python_guard or "DITOLAK" in python_guard, "arbitrary code fail-closed tanpa callback"))
     rag_guard = get_registry().call("rag_search", {"query": "doctor", "path": "../"})
     checks.append(("RAG path guard", "DITOLAK" in rag_guard, "retrieval dibatasi ke workspace"))
+
+    # Paket A: FTS5, prune, dan redaksi terpusat.
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            db = SessionDB(home)
+            sid = db.new_session()
+            db.save(sid, "user", "pencarian peringkat unik-xyz")
+            hits = db.search("unik-xyz")
+            checks.append((
+                "FTS5 search",
+                bool(hits) or db.fts_enabled is False,
+                "BM25 aktif" if db.fts_enabled else "fallback LIKE (FTS5 tidak tersedia)",
+            ))
+            checks.append((
+                "Search empty query",
+                isinstance(db.search("", limit=5), list),
+                "kueri kosong aman",
+            ))
+            mgr = MemoryManager(home)
+            for i in range(30):
+                mgr.append_memory(f"catatan {i}")
+            stats = mgr.prune(max_entries=5, max_chars=1000)
+            checks.append((
+                "Memory prune",
+                len(mgr.read_memory().splitlines()) <= 8 and stats["removed_entries"] > 0,
+                f"{stats['before_chars']} → {stats['after_chars']} karakter",
+            ))
+            mgr.append_memory("nilai api_key=rahasia-prune-999")
+            checks.append((
+                "Redaksi memory",
+                "rahasia-prune-999" not in mgr.read_memory(),
+                "CLI & gateway menulis lewat redact()",
+            ))
+            db.record_tool_event(sid, "read_file", "ok", 12, "{}", "ok")
+            metrics = db.tool_metrics(sid)
+            checks.append((
+                "Tool events",
+                metrics["total_calls"] == 1 and metrics["by_status"].get("ok") == 1,
+                "sessions.db menyimpan jejak tool",
+            ))
+    except Exception as e:  # noqa: BLE001
+        checks.append(("Memory v2 + FTS5", False, str(e)))
+
+    # Paket C: workspace eksplisit & backend sandbox.
+    try:
+        from .tools import file_tools
+
+        ws = file_tools.get_workspace({"cfg": cfg})
+        checks.append(("Workspace eksplisit", isinstance(ws, Path) and ws.is_absolute(), str(ws)))
+    except Exception as e:  # noqa: BLE001
+        checks.append(("Workspace eksplisit", False, str(e)))
+    backend, _backend_err = resolve_execution_backend(cfg.sandbox_mode)
+    docker_ok = backend != "blocked"
+    checks.append((
+        "Sandbox backend",
+        docker_ok,
+        f"mode={cfg.sandbox_mode} → {backend}" + (
+            " (Docker siap)" if backend == "docker" else ""
+        ),
+    ))
+    if cfg.sandbox_mode in {"docker", "auto"}:
+        checks.append((
+            "Docker daemon",
+            DockerExecutor.is_daemon_ready() or cfg.sandbox_mode == "auto",
+            "perlu untuk sandbox_mode=docker",
+        ))
+
+    # Paket D: registry MCP + roundtrip server demo.
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = MCPRegistry(Path(tmp))
+            registry.add_server("demo", sys.executable, ["-m", "laction_agent.mcp.demo_server"])
+            checks.append(("MCP registry", registry.get("demo") is not None, "allowlist mcp_servers.json"))
+            server = registry.get("demo")
+            with MCPStdioClient(server["command"], server["args"], server["env"], timeout=15) as client:
+                client.initialize()
+                tools = {t["name"] for t in client.list_tools()}
+                pong = client.call_tool("ping", {"message": "doctor"})
+            checks.append((
+                "MCP stdio client",
+                {"ping", "workspace_summary"} <= tools and "pong" in pong,
+                f"{len(tools)} tool demo",
+            ))
+    except Exception as e:  # noqa: BLE001
+        checks.append(("MCP stdio client", False, str(e)))
 
     if cfg.provider == "mock":
         checks.append(("API key", True, "tidak dibutuhkan (mock)"))
@@ -571,13 +825,17 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_skills(cfg, args)
         if command == "memory":
             return cmd_memory(cfg, args)
+        if command == "traces":
+            return cmd_traces(cfg, args)
+        if command == "mcp":
+            return cmd_mcp(cfg, args)
         if command == "cron":
             return cmd_cron(cfg, args)
         if command == "gateway":
             return cmd_gateway(cfg, args)
         if command == "doctor":
             return cmd_doctor(cfg)
-        if args.message:
+        if getattr(args, "message", None):
             return one_shot(cfg, args, " ".join(args.message))
         return interactive_chat(cfg, args)
     except ValueError as e:

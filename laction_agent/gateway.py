@@ -10,9 +10,11 @@ Endpoint:
 - `GET  /memory`         MEMORY.md + USER.md
 - `GET  /history?sid=`   riwayat sesi
 - `GET  /cron`           daftar cron job
+- `GET  /traces?sid=`    tool events + metrics (observability)
+- `GET  /mcp`            server MCP terdaftar (allowlist)
 - `POST /chat`           {message, session_id?} -> {reply, session_id}
 - `POST /cron`           {name, task, interval_seconds}
-- `POST /memory`         {note, target: memory|user}
+- `POST /memory`         {note, target: memory|user} atau {action:"prune", ...}
 - `POST /reset`          {session_id?} -> buang agent dari memori
 
 Keamanan: opsional `LACTION_GATEWAY_TOKEN` (Bearer / X-Laction-Token).
@@ -34,9 +36,10 @@ from .config import Config
 from .cron.scheduler import CronScheduler
 from .memory.manager import MemoryManager
 from .memory.session_db import SessionDB
+from .mcp.registry import MCPRegistry
 from .skills.manager import SkillManager
 from .tools.registry import get_registry
-from .utils import log
+from .utils import log, redact
 
 HTML = r"""<!doctype html>
 <html lang="id">
@@ -102,6 +105,11 @@ HTML = r"""<!doctype html>
       <button data-get="/skills">Skills</button>
       <button data-get="/memory">Memory</button>
       <button data-get="/cron">Cron</button>
+      <button data-get="/traces">Traces</button>
+      <button data-get="/mcp">MCP</button>
+    </div>
+    <div class="btns" style="margin-top:8px">
+      <button id="prune">Prune memory</button>
     </div>
     <pre id="panel">Klik tombol inspeksi untuk melihat state agent.</pre>
     <p style="color:var(--muted);font-size:11px;margin-bottom:0">
@@ -185,6 +193,13 @@ document.querySelectorAll('[data-get]').forEach(btn => {
     catch (e) { panel.textContent = 'ERROR: ' + e.message; }
   };
 });
+document.getElementById('prune').onclick = async () => {
+  try {
+    const r = await api('/memory', {method:'POST', body: JSON.stringify({action:'prune', max_entries:50, max_chars:6000, target:'all'})});
+    panel.textContent = JSON.stringify(r, null, 2);
+    bubble('system', 'Memory dipangkas.');
+  } catch (e) { panel.textContent = 'ERROR: ' + e.message; }
+};
 api('/health').then(d => {
   statusEl.textContent = d.provider + ' · ' + d.model + ' · ' + d.tools + ' tools · v' + d.version;
 }).catch(e => { statusEl.textContent = 'offline: ' + e.message; });
@@ -306,6 +321,21 @@ def make_handler(
                 return self._json(200, {"session_id": sid, "history": SessionDB(home).history(sid, limit=50) if sid else []})
             if path == "/cron":
                 return self._json(200, {"jobs": (scheduler or CronScheduler(home)).list_jobs()})
+            if path == "/traces":
+                db = SessionDB(home)
+                sid = (query.get("session_id") or query.get("sid") or [""])[0].strip() or None
+                try:
+                    limit = min(max(int((query.get("limit") or ["50"])[0]), 1), 500)
+                except (TypeError, ValueError):
+                    limit = 50
+                return self._json(200, {
+                    "session_id": sid,
+                    "metrics": db.tool_metrics(sid),
+                    "events": db.tool_events(sid, limit=limit),
+                })
+            if path == "/mcp":
+                registry = MCPRegistry(home)
+                return self._json(200, {"servers": registry.list_servers(), "path": str(registry.path)})
             return self._json(404, {"error": f"Endpoint tidak ditemukan: {path}"})
 
         def do_POST(self):  # noqa: N802
@@ -344,16 +374,33 @@ def make_handler(
                 return self._json(200, {"ok": True, "jobs": sched.list_jobs()})
 
             if path == "/memory":
+                mgr = MemoryManager(home)
+                action = str(data.get("action") or "add").strip().lower()
+                if action == "prune":
+                    try:
+                        max_entries = int(data.get("max_entries") or 50)
+                        max_chars = int(data.get("max_chars") or 6000)
+                    except (TypeError, ValueError):
+                        return self._json(400, {"error": "max_entries/max_chars harus angka."})
+                    target = str(data.get("target") or "all").strip().lower()
+                    try:
+                        stats = mgr.prune(max_entries=max_entries, max_chars=max_chars, target=target)
+                    except ValueError as exc:
+                        return self._json(400, {"error": str(exc)})
+                    return self._json(200, {"ok": True, "action": "prune", "stats": stats})
                 note = str(data.get("note") or "").strip()
                 if not note:
                     return self._json(400, {"error": "Field 'note' wajib diisi."})
-                mgr = MemoryManager(home)
                 target = str(data.get("target") or "memory").lower()
-                if target == "user":
-                    mgr.append_user(note)
-                else:
-                    mgr.append_memory(note)
-                return self._json(200, {"ok": True, "target": target})
+                raw_len = len(redact(note))
+                stored = mgr.append_user(note) if target == "user" else mgr.append_memory(note)
+                return self._json(200, {
+                    "ok": True,
+                    "target": target,
+                    "stored": stored,
+                    "redacted": bool(stored) and stored != " ".join(note.splitlines()).strip(),
+                    "visible_chars": raw_len,
+                })
 
             if path == "/reset":
                 sid = str(data.get("session_id") or "").strip()

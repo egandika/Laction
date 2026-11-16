@@ -38,10 +38,14 @@ flowchart TB
     R --> T2[web_search · web_fetch · rag_search]
     R --> T3[apk_tools · memory_tool · skills_tool]
     R --> T4[delegate_tool · cron_tool · system_tool]
+    R --> T5[mcp_tool · klien stdio]
+
+    T1 --> SBX[DockerExecutor?<br/>sandbox_mode=none|auto|docker]
+    T5 --> MCPS[(data/mcp_servers.json<br/>allowlist)]
 
     T3 --> MEM[(data/<br/>MEMORY.md · USER.md)]
     T3 --> SK[(data/skills/*/SKILL.md)]
-    A --> DB[(data/sessions.db<br/>SQLite)]
+    A --> DB[(data/sessions.db<br/>SQLite FTS5 + tool_events)]
     T4 --> SUB[Sub-agent<br/>sesi terisolasi, depth ≤ 2]
     T4 --> CRON[(data/cron.json)]
 
@@ -112,13 +116,20 @@ Konsekuensi: Gemini sudah memakai compatibility endpoint melalui `OpenAICompatPr
 | Tingkat | Hermes | Laction | Akses |
 |---|---|---|---|
 | Tier 1 | `MEMORY.md` + `USER.md` | ✅ sama | Selalu masuk system prompt (nol latensi retrieval) |
-| Tier 2 | SQLite FTS5 | ✅ `sessions.db` + `LIKE` | Lewat `memory_search` / `GET /history` |
+| Tier 2 | SQLite FTS5 | ✅ `sessions.db` FTS5 (`unicode61`) + ranking `bm25()`, fallback `LIKE` | Lewat `memory_search` / `GET /history` |
 | Tier 3 | Honcho / user modeling | ⏳ belum | Roadmap |
 | Workspace RAG | Retrieval over user files | ✅ `rag_search` (BM25 leksikal) | Path/baris lokal; bukan vector embedding |
 
 Keputusan: Tier 1 sengaja berupa Markdown yang bisa dibaca manusia. User bisa membuka `data/MEMORY.md`, menghapus baris yang salah, atau commit-kan ke repo lain. Tidak ada database opaque untuk ingatan jangka panjang.
 
 Isolasi profil memakai `LACTION_HOME` (analog `HERMES_HOME`): dua terminal dengan `LACTION_HOME=./data/kerja` dan `./data/pribadi` tidak saling berbagi memori, sesi, skill, maupun cron.
+
+Detail implementasi memory v2:
+
+- `SessionDB.search()` membangun kueri FTS5 dari token `\w+` (prefix `"kata"*`, `bm25()` ascending). Kueri kosong mengembalikan baris terbaru; kueri simbol seperti `***` atau hasil FTS5 kosong jatuh ke `LIKE`.
+- Tabel `messages_fts` di-backfill saat inisialisasi dan diisi paralel saat `save()`. Build SQLite tanpa FTS5 tetap jalan (`enable_fts=False` otomatis).
+- `MemoryManager` memusatkan `redact()` pada `append_memory()`/`append_user()`, jadi CLI (`laction memory add`) dan gateway (`POST /memory`) tidak bisa melewati sanitasi. Append memangkas file ke `max_file_chars=32_000`; `read_all()` tidak memotong agar `prompt_builder` tetap bisa menampilkan penanda "karakter lama dipotong".
+- `prune(max_entries, max_chars, target)` mendeduplikasi dari belakang (entri terbaru menang), mempertahankan header, dan mengembalikan statistik before/after.
 
 ---
 
@@ -132,7 +143,7 @@ laction_agent/skills/bundled/*   → bawaan, ikut pip package
 $LACTION_HOME/skills/*           → ditulis agent sendiri (menimpa nama sama)
 ```
 
-`SkillManager.list_skills()` membaca frontmatter `description:` dan menyuntikkan katalog terbatas ke system prompt; body dimuat lewat `view_skill` saat dibutuhkan (progressive disclosure sesuai Agent Skills). Ada 13 skill bawaan; rincian dan keputusan scope ada di [`SKILLS.md`](SKILLS.md). Agent bisa `create_skill` setelah menemukan prosedur yang berulang.
+`SkillManager.list_skills()` membaca frontmatter `description:` dan menyuntikkan katalog terbatas ke system prompt; body dimuat lewat `view_skill` saat dibutuhkan (progressive disclosure sesuai Agent Skills). Ada 16 skill bawaan; rincian dan keputusan scope ada di [`SKILLS.md`](SKILLS.md). Agent bisa `create_skill` setelah menemukan prosedur yang berulang.
 
 Ini versi sederhana dari *closed learning loop* Hermes:
 
@@ -154,15 +165,17 @@ def nama_tool(arg: str, context: dict) -> str:
     ...
 ```
 
-`context` diisi `AIAgent._context()` dan berisi `memory`, `skills`, `db`, `cfg`, `cron`, `approval_mode`, `approve`, `delegate`. Dengan ini tool tidak perlu import `AIAgent` (menghindari circular import), tapi tetap bisa memicu delegasi atau menulis memori.
+`context` diisi `AIAgent._context()` dan berisi `memory`, `skills`, `db`, `cfg`, `cron`, `approval_mode`, `sandbox_mode`, `workspace`, `approve`, `delegate`, `team`. `cfg.workspace`/`LACTION_WORKSPACE` menentukan root `get_workspace(context)`. Dengan ini tool tidak perlu import `AIAgent` (menghindari circular import), tapi tetap bisa memicu delegasi atau menulis memori.
 
 `ToolRegistry.call()` membungkus exception menjadi string JSON. Filosofinya: **tool gagal adalah observasi untuk LLM**, bukan crash proses.
 
 ### Guard
 
-- `_safe(path)` di `file_tools.py`: `resolve()` harus tetap di bawah `Path.cwd()`.
-- `run_terminal`: daftar pola berbahaya + timeout 30 detik + callback approval; tetap bukan sandbox.
-- `run_python`: tidak memakai shell, tetapi selalu butuh approval dan tetap arbitrary code dengan hak OS user.
+- `_safe(path, context=None)` di `file_tools.py`: `resolve()` harus tetap di bawah `get_workspace(context)`; `write_file` menolak `mcp_servers.json`, `cron.json`, dan `SKILL.md`.
+- `run_terminal`: daftar pola berbahaya (termasuk substitusi `$(...)`/backtick) + timeout 30 detik + callback approval; lokal atau container sesuai `sandbox_mode`.
+- `run_python`: tidak memakai shell, tetapi selalu butuh approval; lokal atau container sesuai `sandbox_mode`.
+- `sandbox.py`: `DockerExecutor` merakit `docker run --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m --cap-drop ALL --security-opt no-new-privileges --pids-limit 64 --memory 256m --cpus 1.0 --user 65534:65534` dengan workspace `ro`. `resolve_execution_backend()` fail-closed pada mode `docker` dan turun ke lokal pada `auto`.
+- `tools/mcp_tool.py`: `mcp_call` ada di luar `READ_ONLY_TOOLS`, butuh approval, dan hanya menerima server yang terdaftar di `mcp_servers.json`.
 - `apk_analyze`/`apk_extract`: batas ukuran, manifest/AXML statis, ekstraksi satu entry; tidak menjalankan APK.
 - `rag_search`: workspace-only, mengecualikan data/build/hidden dirs, mengembalikan kutipan file/baris.
 - `web_search`: endpoint DuckDuckGo tetap dan best-effort; query keluar ke pihak ketiga.
@@ -190,11 +203,15 @@ Estimasi token = `len(content)/4` + argumen tool call. Angka kasar, tapi cukup u
 
 | Surface | Karakter |
 |---|---|
-| `cli.py` | One-shot, REPL dengan slash command, `status/tools/skills/memory/init/doctor`, approve interaktif |
-| `gateway.py` | `ThreadingHTTPServer`, UI HTML/JS tanpa build, semua fetch relatif (aman di balik proxy preview), CORS terbuka, token opsional |
+| `cli.py` | One-shot, REPL dengan slash command (`/memory`, `/traces`, dst.), `status/tools/skills/memory/traces/mcp/init/doctor`, approve interaktif |
+| `gateway.py` | `ThreadingHTTPServer`, UI HTML/JS tanpa build, semua fetch relatif (aman di balik proxy preview), CORS terbuka, token opsional; endpoint `/traces`, `/mcp`, `POST /memory` prune |
 | `cron/scheduler.py` | `cron.json` + daemon thread; tiap job memanggil `AIAgent(cfg)` dengan sesi baru agar riwayat cron tidak bercampur chat |
 
 Gateway menyimpan satu `AIAgent` per `session_id` di memori dan memserialisasi `agent.run()` dengan `run_lock` (satu agent tidak dipakai dua request bersamaan).
+
+### Observability (`tool_events`)
+
+`AIAgent.run()` membungkus setiap panggilan tool dengan `time.perf_counter()` dan menulis satu baris ke tabel `tool_events` (`session_id`, `tool_name`, `status` ∈ `ok|error|denied|reflexion_blocked`, `duration_ms`, preview argumen/hasil yang sudah di-redaksi). `SessionDB.tool_metrics()` mengagregasi total/avg/max per status & per tool. Surface-nya: `laction traces [--session --limit --json]`, `/traces` di REPL, blok `Tool events` di `laction status`, dan `GET /traces` + tombol **Traces** di gateway.
 
 ---
 
@@ -202,12 +219,12 @@ Gateway menyimpan satu `AIAgent` per `session_id` di memori dan memserialisasi `
 
 | Hermes | Laction v0.1 | Alasan |
 |---|---|---|
-| ~50 tools + MCP ~1000 baris | 25 tools, registry tetap tipis | Inti mudah diaudit; penambahan dipisah per modul |
-| Docker / SSH / Singularity / Modal / Daytona | `subprocess` lokal + approval | Cukup untuk repo kecil |
+| ~50 tools + MCP ~1000 baris | 33 tools (termasuk 3 tool MCP), registry tetap tipis | Inti mudah diaudit; penambahan dipisah per modul |
+| Docker / SSH / Singularity / Modal / Daytona | `subprocess` lokal + approval, `DockerExecutor` opsional | Sandbox kernel penuh belum ada; Docker dipakai bila tersedia |
 | 20+ platform messaging | CLI + HTTP | Gateway bisa jadi fondasi adapter |
-| FTS5 + Honcho | SQLite `LIKE` + Markdown | Zero dependency |
+| FTS5 + Honcho | SQLite FTS5 (fallback `LIKE`) + Markdown | Tetap zero dependency (FTS5 bagian dari stdlib `sqlite3`) |
 | DSPy / GEPA self-optimisation | `create_skill` manual | Loop tertutup sudah ada, optimiser menyusul |
-| Subagent pool paralel | Delegasi rekursif depth ≤ 2, serial | Hindari race condition di v0.1 |
+| Subagent pool paralel | Tim paralel 1–2 worker + reviewer dengan deadline wall-clock | Batas konkurensi dijaga semaphore; pool adaptif menyusul |
 
 ---
 
@@ -222,7 +239,8 @@ Gateway menyimpan satu `AIAgent` per `session_id` di memori dan memserialisasi `
 | APK triage | `tools/apk_tools.py` — ZIP/AXML parsing bounded, statis saja |
 | Public web search | `tools/search_tool.py` — DDG HTML best-effort, query eksternal |
 | Surface baru | `cli.py` subcommand / `gateway.py` endpoint |
-| Backend eksekusi | Ganti `run_terminal` dengan implementasi Docker/SSH yang sama kontraknya |
+| Backend eksekusi | `sandbox.py` (`DockerExecutor`); tambah backend baru dengan kontrak `run(argv, workspace, timeout)` yang sama |
+| Server MCP | Daftarkan di `<LACTION_HOME>/mcp_servers.json` atau `laction mcp add` |
 | Memory remote | Tambah adapter di `memory/` lalu suntikkan ke `prompt_builder.py` |
 
 ---
@@ -245,8 +263,11 @@ Perluasan tetap mematuhi no-core-dependency dan memisahkan prosedur dari aksi:
 - `web_search` best-effort ke HTML DuckDuckGo dan mengirim query keluar; bukan Google/Brave API.
 - `rag_search` memberi retrieval BM25 lokal dengan sitasi path/baris; belum ada embedding/vector memory.
 - `apk_analyze` membaca APK ZIP + text/binary AXML dan scan terbatas; `apk_extract` hanya satu entry. Keduanya statis, tidak menjalankan APK.
-- Gemini masuk lewat OpenAI-compatible adapter. MCP, messaging, media, vector DB, dan Android dynamic analysis tetap roadmap.
-- Skill bawaan kini 13; metadata dibatasi di katalog system prompt, body dimuat lewat `view_skill`.
+- Workspace root eksplisit (`--workspace` / `LACTION_WORKSPACE`) menggantikan `Path.cwd()` saat import.
+- Observability lokal lewat `tool_events` di `sessions.db` (+ `laction traces`, `GET /traces`).
+- `consult_team` kini punya deadline wall-clock total (`LACTION_TEAM_TIMEOUT`, default 45s).
+- MCP `stdio` minimal (JSON-RPC 2.0, allowlist `mcp_servers.json`, frame ≤ 1 MiB, env host disaring). Transport HTTP/SSE, messaging, media, vector DB, dan Android dynamic analysis tetap roadmap.
+- Skill bawaan kini 16; metadata dibatasi di katalog system prompt, body dimuat lewat `view_skill`.
 
 Rincian bukti dan alasan pemilihan ada di [`SKILLS.md`](SKILLS.md).
 
@@ -254,4 +275,4 @@ Rincian bukti dan alasan pemilihan ada di [`SKILLS.md`](SKILLS.md).
 
 ## 13. Ringkasan satu kalimat
 
-**Laction Agent = loop ReAct stdlib-only dengan 25 tools, 13 skill bawaan, memory lokal, dan mock provider; fitur eksternal/dinamis dibatasi eksplisit agar tidak mengklaim kemampuan yang belum dibuat.**
+**Laction Agent = loop ReAct stdlib-only dengan 33 tools, 16 skill bawaan, memory FTS5 lokal, observability `tool_events`, MCP stdio opsional, dan mock provider; fitur eksternal/dinamis dibatasi eksplisit agar tidak mengklaim kemampuan yang belum dibuat.**
