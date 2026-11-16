@@ -13,7 +13,7 @@ reg = get_registry()
 
 @reg.register(
     "delegate_task",
-    "Delegasikan tugas ke sub-agent terisolasi (cocok untuk kerja paralel / riset terpisah).",
+    "Delegasikan satu tugas ke sub-agent read-only dengan sesi terpisah; bukan sandbox.",
     {"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]},
 )
 def delegate_task(task: str, context: dict) -> str:
@@ -24,3 +24,18 @@ def delegate_task(task: str, context: dict) -> str:
         return delegate(task)
     except Exception as e:  # noqa: BLE001
         return f"ERROR delegasi: {e}"
+
+
+@reg.register(
+    "consult_team",
+    "Konsultasikan 1–2 spesialis read-only secara paralel, lalu reviewer terpisah. Tidak menerapkan perubahan. Provider eksternal tetap menerima tugas/temuan.",
+    {"type": "object", "properties": {
+        "task": {"type": "string", "description": "Tugas dan konteks yang boleh dibagikan ke provider"},
+        "roles": {"type": "array", "items": {"type": "string", "enum": ["apk", "research", "report"]}, "minItems": 1, "maxItems": 2},
+    }, "required": ["task", "roles"]},
+)
+def consult_team(task: str, roles: list[str], context: dict | None = None) -> str:
+    team = (context or {}).get("team")
+    if team is None:
+        return "DITOLAK: tim tidak tersedia di konteks ini."
+    return team(task, roles)

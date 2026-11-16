@@ -22,6 +22,7 @@ Contoh:
 from __future__ import annotations
 
 import re
+import json
 
 from ..utils import truncate
 from .base import BaseProvider, Message, ProviderResponse, ToolCall
@@ -73,8 +74,28 @@ class MockProvider(BaseProvider):
                 )
             )
 
+        # The mock has no reasoning ability. Never interpret untrusted specialist
+        # findings as commands during a reviewer pass.
+        if any(m.role == "system" and "Spesialis: Evaluator independen:" in m.content for m in messages):
+            return ProviderResponse(content="Mode mock tidak dapat memverifikasi klaim atau bukti. Tinjau temuan secara manual atau gunakan model yang mendukung penalaran.")
         user_text = self._last_user(messages)
         text = user_text.lower()
+
+        # Explicit mock routes: the mock is a parser, not a reasoning model.
+        simulation = re.match(r"evolusi:\s*(.+)", user_text, re.IGNORECASE | re.DOTALL)
+        if simulation:
+            try:
+                args = json.loads(simulation.group(1))
+                if not isinstance(args, dict):
+                    raise ValueError("harus objek JSON")
+                return ProviderResponse(tool_calls=[ToolCall("evolve_plan", args, self._next_id())])
+            except (ValueError, json.JSONDecodeError):
+                return ProviderResponse(content="ERROR: evolusi membutuhkan objek JSON yang valid.")
+        team = re.match(r"(?:tim|team):\s*(.+)", user_text, re.IGNORECASE | re.DOTALL)
+        if team:
+            return ProviderResponse(tool_calls=[ToolCall("consult_team", {"task": team.group(1).strip(), "roles": ["research", "report"]}, self._next_id())])
+        if re.search(r"\b(?:cek|periksa)\s+(?:kesehatan|ram|storage)\b", text):
+            return ProviderResponse(tool_calls=[ToolCall("device_health", {}, self._next_id())])
 
         # --- Memory (baca dulu sebelum pola simpan) ---
         if re.search(r"\b(apa|tampilkan|lihat|baca|daftar)\b.*\b(ingat|ingatan|memori|memory)\b", text) or text in ("memori", "memory", "list memory"):

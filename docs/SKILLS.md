@@ -1,5 +1,7 @@
 # Analisis & keputusan daftar skill Laction
 
+> Catatan 2026-11-16: review lanjutan atas orkestrasi, cron, approval, dan simulasi ada di [AGENTIC.md](AGENTIC.md); angka/jumlah dalam dokumen ini mencatat scope sebelumnya.
+
 Tanggal riset: **16 November 2026**. Tujuan bukan menyalin semua label menjadi fitur palsu, melainkan memilih kemampuan yang cocok dengan batas desain Laction: Python 3.11+, stdlib-only, local-first, mock tanpa API key, dan tindakan berisiko harus dibatasi.
 
 ## Ringkasan keputusan
@@ -16,13 +18,13 @@ Tanggal riset: **16 November 2026**. Tujuan bukan menyalin semua label menjadi f
 | Planning & reflection | Ditambah sebagai skill + aturan system prompt | `planning` memecah tugas; `reflection` memeriksa hasil yang dapat diamati. Tidak meminta model membuka chain-of-thought privat; jawaban memberi kesimpulan, checklist, dan bukti. |
 | Short/long-term memory | Sudah ada | Riwayat turn di SQLite, fakta/preferensi di `MEMORY.md`/`USER.md`, prosedur di `SKILL.md`. FTS5 dan vector store belum ada. |
 | Python runner / debugger | Ditambah | `run_python` menjalankan potongan Python tanpa shell, timeout 1–30 detik, **approval eksplisit selalu**. Ini tetap arbitrary code dengan hak OS user—bukan sandbox; gateway/one-shot tanpa approval tidak mengeksekusi. |
-| Shell, file, Git, Termux | Sudah ada + skill | `run_terminal` dan file tools bekerja lokal; `git-workflow` menjelaskan inspeksi dan guard. Termux adalah lingkungan eksekusi, bukan backend khusus. `run_terminal` tetap `shell=True` dan bukan sandbox. |
+| Shell, file, Git, Termux | Sudah ada + skill | `run_terminal` dan file tools bekerja lokal; `git-workflow` menjelaskan inspeksi dan guard. Termux adalah lingkungan eksekusi, bukan backend khusus. `run_terminal` tetap `shell=True` dan bukan sandbox; sekarang selalu meminta approval. |
 | Web scraper / reader | Sudah ada | `web_fetch` mengambil halaman HTTP(S) publik; guard SSRF menolak alamat private. |
 | Web search / OSINT publik | Ditambah, terbatas | `web_search` mengurai hasil HTML DuckDuckGo tanpa dependency/API key; endpoint ini tidak resmi, bisa berubah/rate-limit, dan **query dikirim ke DuckDuckGo** [2](https://bestscraperapi.com/guides/how-to-scrape-duckduckgo). `public-web-research` mewajibkan sumber publik, verifikasi halaman, serta larangan doxxing/credential collection. Bukan Google/Brave API. |
 | APK extractor, manifest, permission, DEX string, secret scan, laporan statis | Ditambah | `apk_analyze` membaca APK ZIP, text/binary Android XML (AXML), permission, exported components, flag app, URL host dan pola credential; secret value tidak dicetak. `apk_extract` menulis satu entry pilihan ke workspace dengan batas ukuran/path. Tidak install atau menjalankan APK. |
 | Smali/jadx/apktool | Terbatas | Raw entry bisa diekstrak; dekompilasi penuh perlu `jadx`/`apktool` yang dipasang terpisah. Tidak ada decompiler bawaan. |
 | Android dynamic analysis | Ditunda | Frida/Logcat memerlukan device/emulator/lab terisolasi dan izin; tidak cocok dijalankan otomatis dari agent local-first generik. |
-| Scheduler, notes, translator, summarizer | Sebagian sudah ada | Cron interval dan memory notes sudah tersedia; `productivity-workflows` mengatur penggunaan/ekspektasi. Translator/summarizer memerlukan LLM sungguhan; mock hanya menguji flow, bukan kualitas bahasa. Cron belum menjadi push notification atau job sekali-jalan. |
+| Scheduler, notes, translator, summarizer | Sebagian sudah ada | Cron interval dan memory notes sudah tersedia; cron sekarang read-only; `productivity-workflows` mengatur penggunaan/ekspektasi. Translator/summarizer memerlukan LLM sungguhan; mock hanya menguji flow, bukan kualitas bahasa. Cron belum menjadi push notification atau job sekali-jalan. |
 | RAG / vector memory | Ditambah sebagian | `rag_search` melakukan ranking **BM25 leksikal** pada file teks workspace, hasil berisi path:baris; batas ukuran dan folder sensitif dikecualikan. BM25 adalah retrieval kata kunci (lihat [3](https://ngpestelos.com/reference/bm25/)), **bukan** semantic/vector embeddings. Embedding memerlukan model/API atau dependency/storage tambahan. |
 | OpenRouter / Gemini API | Ditambah Gemini | OpenRouter sudah ada. Provider `gemini` baru menggunakan endpoint OpenAI-compatible resmi Google dan function calling [4](https://ai.google.dev/gemini-api/docs/openai). Model/key tetap milik user; fitur khusus Gemini di luar Chat Completions tidak otomatis tersedia. |
 | Telegram / WhatsApp bot | Ditunda | Memerlukan bot token, webhook/polling, penyimpanan secret, persetujuan penerima, dan batas pengiriman eksternal. Tidak aman menganggap messaging sebagai tool tanpa kebijakan consent. |

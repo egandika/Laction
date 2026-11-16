@@ -107,7 +107,7 @@ class Config:
         if self.approval_mode == "never":
             out.append(
                 "approval_mode=never menonaktifkan prompt persetujuan; "
-                "perintah berbahaya tetap diblokir."
+                "semua perintah shell dan Python tetap diblokir."
             )
         if self.provider == "ollama" and (
             not self.api_base

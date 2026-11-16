@@ -16,8 +16,8 @@ Repo ini awalnya hanya berisi `README.md`, jadi saya rancang agent yang:
 | Tidak ribet install | Python 3.11+ **stdlib saja** (`urllib`, `sqlite3`, `http.server`, `argparse`) |
 | Data tetap milik user | `MEMORY.md`, `USER.md`, `sessions.db`, `skills/`, `cron.json` di `LACTION_HOME` (default `./data`, di-gitignore) |
 | Model-agnostic | Satu interface `BaseProvider`; OpenAI / OpenRouter / Gemini / Ollama / Nous / endpoint custom lewat format Chat Completions |
-| Bisa tumbuh | Agent bisa menulis `SKILL.md` baru dari pengalaman (*closed learning loop*) |
-| Aman dipakai di repo | Path traversal dicegah, terminal punya `approval_mode`, tool error tidak bikin agent crash |
+| Bisa tumbuh | Agent dapat mengusulkan `SKILL.md` baru; penulisan memerlukan approval |
+| Guard dasar | Path traversal dibatasi dan shell/Python perlu approval; ini bukan sandbox dan bukan jaminan keamanan |
 | Bukan cuma CLI | Ada Gateway HTTP + UI chat vanila JS, plus cron scheduler |
 
 ### Pemetaan 6 layer Hermes → Laction
@@ -77,7 +77,7 @@ Mode `mock` benar-benar memanggil tool: baca/tulis file, jalankan shell, simpan 
 laction "list file"                         # one-shot
 laction "baca file README.md"
 laction "tulis file catatan.txt isi halo"
-laction "jalankan git status --short"
+laction chat  # di chat: jalankan git status --short (perlu approval)
 laction "ingat: saya lebih suka Bahasa Indonesia"
 laction "apa yang kamu ingat?"
 laction "cari ingatan kopi"
@@ -87,8 +87,11 @@ laction "analisis APK aplikasi.apk"               # APK milik/yang boleh diaudit
 laction chat                                     # di dalam chat: Python: print(1 + 1), perlu approval
 laction "list skill"
 laction "lihat skill repo-onboarding"
-laction "buat skill ringkas-repo: 1. list file 2. baca README 3. simpan ringkasan"
+laction chat  # di chat: buat skill ringkas-repo: 1. list file 2. baca README (perlu approval)
 laction "delegasikan: list tool"
+laction "tim: list file"                     # dua spesialis + reviewer read-only
+laction "cek kesehatan"                     # RAM + storage, read-only
+laction 'evolusi: {"options":[{"name":"A","cost":1,"benefits":[2,3]}],"budget":1}'
 laction "list cron"
 laction "tambah cron harian | list file | 3600"
 
@@ -200,12 +203,12 @@ Laction/
 
 ---
 
-## 6. Daftar tool (25)
+## 6. Daftar tool (29)
 
 | Tool | Fungsi |
 |---|---|
 | `read_file`, `write_file`, `list_files`, `search_files` | Akses file workspace dengan guard path traversal |
-| `run_terminal` | Shell lokal 30 detik, approval, dan guard perintah berbahaya |
+| `run_terminal` | Shell lokal 30 detik, selalu perlu approval eksplisit; bukan sandbox |
 | `run_python` | Runner kode Python, timeout 1–30 detik, **persetujuan eksplisit selalu**; bukan sandbox |
 | `web_search`, `web_fetch` | Pencarian DDG best-effort + baca halaman publik; pencarian mengirim query ke DDG |
 | `rag_search` | Retrieval lokal BM25 pada file teks, mengembalikan path/baris (bukan vector embeddings) |
@@ -213,7 +216,9 @@ Laction/
 | `memory_save`, `memory_read`, `user_save` | Tier-1 memory: `MEMORY.md` / `USER.md` |
 | `memory_search` | Tier-2: cari riwayat sesi di SQLite |
 | `list_skills`, `view_skill`, `create_skill` | Procedural memory / self-improvement |
-| `delegate_task` | Sub-agent dengan sesi terisolasi (maks depth 2) |
+| `delegate_task`, `consult_team` | Sub-agent read-only; tim 1–2 spesialis paralel + reviewer, bukan sandbox |
+| `device_health` | RAM dan storage read-only |
+| `simulate_files`, `evolve_plan` | Dunia file virtual in-memory dan simulasi evolusi numerik terbatas; tidak menerapkan perubahan |
 | `cron_add`, `cron_list`, `cron_remove` | Jadwal berulang |
 | `get_time`, `list_tools`, `agent_info` | Utilitas sistem |
 
@@ -232,6 +237,8 @@ tugas selesai
                     system prompt sesi berikutnya memuat memory + daftar skill
 ```
 
+Skill baru memerlukan approval eksplisit dan tidak boleh menimpa skill yang sudah ada. Ini prosedur tertulis, bukan pelatihan model atau kode yang otomatis teruji.
+
 Skill bawaan (13): `repo-onboarding`, `code-review`, `release-notes`, `self-improvement`, `planning`, `reflection`, `python-debugging`, `git-workflow`, `android-apk-static-analysis`, `local-rag`, `public-web-research`, `provider-setup`, `productivity-workflows`.
 
 `SKILL.md` memakai frontmatter `name` + `description` mengikuti [Agent Skills spec](https://agentskills.io/specification): katalog ringkas dimuat saat sesi, isi lengkap dibaca via `view_skill` bila diperlukan. Skill bawaan divalidasi namanya/frontmatter-nya oleh test.
@@ -242,9 +249,8 @@ Skill bawaan (13): `repo-onboarding`, `code-review`, `release-notes`, `self-impr
 
 - **Workspace guard**: `read_file`/`write_file`/`list_files` menolak path yang `.resolve()` keluar dari workspace.
 - **Approval mode**:
-  - `smart` (default): perintah shell berbahaya minta persetujuan; `run_python` selalu minta persetujuan eksplisit.
-  - `always`: semua `run_terminal` dan `run_python` minta persetujuan.
-  - `never`: shell berbahaya dan seluruh `run_python` diblokir.
+  - `smart` (default) dan `always`: semua `run_terminal`, `run_python`, dan `create_skill` perlu persetujuan eksplisit.
+  - `never`: shell, Python dan pembuatan skill tidak dijalankan.
 - **Deteksi perintah berbahaya** mencakup rangkaian `;`, `&&`, `||`, `|`, substitusi `$(...)` dan backtick — bukan cuma kata pertama.
 - **SSRF guard**: `web_fetch` menolak loopback/private/link-local/`localhost`/`.internal`, termasuk hasil DNS. Opt-out: `LACTION_ALLOW_PRIVATE_WEB=1`.
 - **Web search**: `web_search` memakai HTML DuckDuckGo yang tidak resmi, bisa rate-limit/berubah; query dikirim ke pihak ketiga. Pola credential umum ditolak, tetapi jangan kirim secret/data privat.
@@ -253,7 +259,7 @@ Skill bawaan (13): `repo-onboarding`, `code-review`, `release-notes`, `self-impr
 - **RAG**: `rag_search` hanya file teks lokal yang diizinkan, mengecualikan `data/`, hidden dirs, `.git`, virtualenv, dan output build; retrieval BM25 leksikal, bukan vector.
 - **Redaksi secret**: token `sk-*`, `ghp_*`, `github_pat_*`, `xox*-*`, `AKIA...`, `AIza*`, `Bearer ...`, dan `api_key=...` disamarkan sebelum masuk log, `sessions.db`, `MEMORY.md`, `USER.md`, maupun `SKILL.md`.
 - **Batas konteks**: memory yang disuntik ke system prompt dibatasi 6.000 karakter terbaru; katalog skill maks 40 entri dan 2.200 karakter.
-- **Tool isolation**: exception di tool diubah jadi string `{"error": ...}`, agent tetap hidup.
+- **Penanganan error tool** (bukan sandbox): exception di tool diubah jadi string `{"error": ...}`, agent tetap hidup.
 - **Provider error** ditangkap dan di-redaksi, tidak membocorkan API key ke log.
 - **Gateway**: tanpa token jangan diekspos publik; aktifkan `LACTION_GATEWAY_TOKEN` + reverse proxy. Gateway masih CORS `*`, tanpa TLS/rate-limit.
 - `data/`, `.env`, `config.yaml`, `*.db*`, `*.log` sudah di-`.gitignore`.
@@ -271,7 +277,7 @@ pip install -e ".[dev]"
 python3 -m pytest -q
 ```
 
-**63 test** mencakup config/provider (termasuk Gemini), tool registry, file guard, loop mock, memory, skills, delegasi, context compressor, CLI/gateway, Python approval, BM25 RAG, parser DuckDuckGo, APK text/binary AXML + zip-slip guard, routing mock, dan regresi keamanan (`tests/test_review_fixes.py`, `tests/test_added_capabilities.py`).
+**79 test** mencakup config/provider (termasuk Gemini), tool registry, file guard, loop mock, memory, skills, delegasi, context compressor, CLI/gateway, Python approval, BM25 RAG, parser DuckDuckGo, APK text/binary AXML + zip-slip guard, routing mock, dan regresi keamanan (`tests/test_review_fixes.py`, `tests/test_added_capabilities.py`, `tests/test_agentic_workflows.py`).
 
 `laction doctor` juga memverifikasi 5 guard keamanan (redaksi, terminal, SSRF, approval Python, path RAG).
 
@@ -296,3 +302,8 @@ Rencana lanjutan paling masuk akal (berurutan sesuai prioritas review):
 ## 11. Lisensi
 
 MIT — lihat [`LICENSE`](LICENSE).
+
+
+## 12. Multi-agent & simulasi terbatas
+
+`consult_team` membatasi 1–2 spesialis read-only paralel plus reviewer; cron juga hanya read-only. `simulate_files` memakai dunia file in-memory, bukan shell/emulator. `evolve_plan` mengoptimalkan model angka dengan seleksi, crossover, mutasi dan batas resource; hasil tidak otomatis diterapkan atau dijamin optimal. Shell, Python dan penulisan skill baru memerlukan persetujuan interaktif. **Tidak ada sandbox OS untuk kode tak tepercaya.** Lihat [docs/AGENTIC.md](docs/AGENTIC.md) untuk contoh, keamanan, keterbatasan, dan sumber riset.

@@ -79,7 +79,8 @@ class CronScheduler:
     def _trigger(self, job: dict):
         name = job["name"]
         with self._lock:
-            if name in self._running:
+            if name in self._running or len(self._running) >= 3:
+                log.warning("Cron %r dilewati: sudah berjalan atau batas 3 job aktif tercapai", name)
                 return
             self._running.add(name)
 

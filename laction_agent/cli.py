@@ -26,6 +26,7 @@ except ImportError:
 
 from . import __version__
 from .agent import AIAgent
+from .policies import READ_ONLY_TOOLS
 from .config import Config, VALID_APPROVAL_MODES, VALID_PROVIDERS
 from .cron.scheduler import CronScheduler
 from .memory.manager import MemoryManager
@@ -429,7 +430,7 @@ def cmd_init(cfg: Config, args: argparse.Namespace) -> int:
 def _cron_scheduler(cfg: Config) -> CronScheduler:
     def _run(task: str) -> str:
         log.info("Cron run: %s", task[:80])
-        return AIAgent(cfg).run(f"[cron] {task}")
+        return AIAgent(cfg, allowed_tools=READ_ONLY_TOOLS).run(f"[cron] {task}")
 
     return CronScheduler(Path(cfg.home), on_run=_run)
 

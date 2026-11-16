@@ -33,10 +33,10 @@ class ToolRegistry:
             return fn
         return deco
 
-    def schemas(self) -> list[dict]:
+    def schemas(self, allowed_tools: frozenset[str] | None = None) -> list[dict]:
         return [
             {"name": t.name, "description": t.description, "parameters": t.parameters}
-            for t in self._tools.values()
+            for t in self._tools.values() if allowed_tools is None or t.name in allowed_tools
         ]
 
     def names(self) -> list[str]:
@@ -46,6 +46,9 @@ class ToolRegistry:
         return self._tools.get(name)
 
     def call(self, name: str, arguments: dict, context: dict | None = None) -> str:
+        allowed = (context or {}).get("allowed_tools")
+        if allowed is not None and name not in allowed:
+            return f"DITOLAK: tool {name} tidak diizinkan dalam konteks terbatas."
         tool = self._tools.get(name)
         if tool is None:
             return json.dumps({"error": f"Tool tidak dikenal: {name}", "available": self.names()})
@@ -65,5 +68,5 @@ def get_registry() -> ToolRegistry:
     if _registry is None:
         _registry = ToolRegistry()
         # Import di sini supaya tool mendaftar sendiri (hindari circular import)
-        from . import apk_tools, cron_tool, delegate_tool, file_tools, memory_tool, python_tool, rag_tool, search_tool, skills_tool, system_tool, terminal_tool, web_tools  # noqa: F401
+        from . import simulation_tool, apk_tools, cron_tool, delegate_tool, file_tools, memory_tool, python_tool, rag_tool, search_tool, skills_tool, system_tool, terminal_tool, web_tools  # noqa: F401
     return _registry
