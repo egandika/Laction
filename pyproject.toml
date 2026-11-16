@@ -1,5 +1,7 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+# PEP 639 (license sebagai string SPDX + license-files) butuh setuptools >= 77.
+# Build isolation akan memasang versi yang memenuhi secara otomatis.
+requires = ["setuptools>=77.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,13 +10,13 @@ version = "0.1.0"
 description = "Laction Agent — AI Agent lokal yang tumbuh bareng kamu (Hermes-inspired)"
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{name = "Laction"}]
 keywords = ["ai-agent", "autonomous", "hermes-inspired", "local-first"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
 ]
 

@@ -1,6 +1,7 @@
 """Tools skills: list, view, create SKILL.md (procedural memory)."""
 from __future__ import annotations
 
+from ..utils import redact
 from .registry import get_registry
 
 reg = get_registry()
@@ -44,7 +45,7 @@ def create_skill(name: str, content: str, context: dict) -> str:
     if mgr is None:
         return "Skill manager tidak tersedia."
     try:
-        path = mgr.create_skill(name, content)
+        path = mgr.create_skill(name, redact(content))
         return f"Skill '{name}' dibuat di {path}"
     except Exception as e:  # noqa: BLE001
         return f"ERROR membuat skill: {e}"

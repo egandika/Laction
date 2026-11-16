@@ -105,9 +105,18 @@ class Config:
         if self.provider != "mock" and self.model.startswith("mock"):
             out.append("LACTION_MODEL masih 'mock-laction-1'; ganti ke model asli untuk provider ini.")
         if self.approval_mode == "never":
-            out.append("approval_mode=never menonaktifkan proteksi perintah berbahaya.")
-        if self.provider == "ollama" and "localhost" in self.api_base:
-            out.append("Gateway yang berjalan di container tidak bisa menjangkau localhost host; pakai alamat jaringan Ollama.")
+            out.append(
+                "approval_mode=never menonaktifkan prompt persetujuan; "
+                "perintah berbahaya tetap diblokir."
+            )
+        if self.provider == "ollama" and (
+            not self.api_base
+            or any(h in self.api_base for h in ("localhost", "127.0.0.1", "::1"))
+        ):
+            out.append(
+                "Gateway yang berjalan di container tidak bisa menjangkau localhost host; "
+                "pakai alamat jaringan Ollama."
+            )
         return out
 
 

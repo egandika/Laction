@@ -49,7 +49,11 @@ def _shrink(m: Message, max_chars: int) -> Message:
 
 
 def compress(messages: list[Message], limit: int = 8000) -> list[Message]:
-    if estimate_tokens(messages) <= limit or len(messages) <= 6:
+    # PERHATIAN: jangan pakai shortcut `len(messages) <= 6`. Lima tool result
+    # berukuran 8000 karakter sudah ~10k token tapi tetap 6 pesan — versi lama
+    # membiarkannya lewat tanpa kompresi. Yang aman: <= 3 pesan (system + user
+    # + satu balasan) memang tidak ada yang bisa diringkas.
+    if estimate_tokens(messages) <= limit or len(messages) <= 3:
         return messages
 
     system: list[Message] = []

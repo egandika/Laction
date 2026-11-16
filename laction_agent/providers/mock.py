@@ -107,7 +107,9 @@ class MockProvider(BaseProvider):
         if m:
             rest = m.group(1).strip()
             if rest.startswith("-"):
-                return ProviderResponse(tool_calls=[ToolCall("run_terminal", {"command": user_text.strip()}, self._next_id())])
+                # Normalisasi ke `ls`, jadi "list file -la" tidak jadi
+                # perintah shell "list file -la" yang tidak ada.
+                return ProviderResponse(tool_calls=[ToolCall("run_terminal", {"command": "ls " + rest}, self._next_id())])
             return ProviderResponse(tool_calls=[ToolCall("list_files", {"path": rest or "."}, self._next_id())])
 
         # --- Terminal & web ---

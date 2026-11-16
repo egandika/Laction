@@ -31,7 +31,9 @@ Repo ini awalnya hanya berisi `README.md`, jadi saya rancang agent yang:
 | Skill | `skills/` (`SKILL.md` bawaan + buatan agent) |
 | Execution | `tools/` (file, terminal, web, memory, skill, cron, delegasi) |
 
-Detail lengkap ada di [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Dokumen lanjutan:
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — desain mendalam, diagram Mermaid, trace satu turn.
+- [`docs/REVIEW.md`](docs/REVIEW.md) — **review kode**: penjelasan cara kerja tiap bagian, 9 temuan bug (termasuk 3 celah keamanan), perbaikan, dan risiko residual.
 
 ---
 
@@ -167,6 +169,7 @@ Semua provider non-mock memakai `urllib` (tanpa `requests`). Format tool mengiku
 Laction/
 ├── README.md                  # dokumen ini
 ├── docs/ARCHITECTURE.md       # desain mendalam + diagram alur
+├── docs/REVIEW.md             # review kode, temuan bug & perbaikan
 ├── pyproject.toml             # packaging, entry point `laction`, pytest config
 ├── .env.example               # template environment
 ├── config.yaml.example        # template config YAML
@@ -196,7 +199,7 @@ Laction/
 |---|---|
 | `read_file`, `write_file`, `list_files`, `search_files` | Akses file workspace (dengan guard path traversal) |
 | `run_terminal` | Shell 30 detik + approval + blokir perintah berbahaya |
-| `web_fetch` | Ambil halaman web jadi teks polos |
+| `web_fetch` | Ambil halaman web publik jadi teks polos (alamat privat ditolak) |
 | `memory_save`, `memory_read`, `user_save` | Tier-1 memory: `MEMORY.md` / `USER.md` |
 | `memory_search` | Tier-2: cari riwayat sesi di SQLite |
 | `list_skills`, `view_skill`, `create_skill` | Procedural memory / self-improvement |
@@ -227,15 +230,21 @@ Skill bawaan: `repo-onboarding`, `code-review`, `release-notes`, `self-improveme
 
 ## 8. Keamanan
 
-- **Workspace guard**: `read_file`/`write_file`/`list_files` menolak path yang.resolve() keluar dari repo.
+- **Workspace guard**: `read_file`/`write_file`/`list_files` menolak path yang `.resolve()` keluar dari workspace.
 - **Approval mode**:
   - `smart` (default): hanya perintah berbahaya yang minta persetujuan di REPL.
   - `always`: semua `run_terminal` minta persetujuan.
-  - `never`: perintah berbahaya diblokir total.
+  - `never`: perintah berbahaya diblokir total (prompt persetujuan dimatikan).
+- **Deteksi perintah berbahaya** mencakup rangkaian `;`, `&&`, `||`, `|`, substitusi `$(...)` dan backtick — bukan cuma kata pertama.
+- **SSRF guard**: `web_fetch` menolak loopback/private/link-local/`localhost`/`.internal`, termasuk hasil DNS. Opt-out: `LACTION_ALLOW_PRIVATE_WEB=1`.
+- **Redaksi secret**: token `sk-*`, `ghp_*`, `github_pat_*`, `xox*-*`, `AIza*`, `Bearer ...`, dan `api_key=...` disamarkan sebelum masuk log, `sessions.db`, `MEMORY.md`, `USER.md`, maupun `SKILL.md`.
+- **Batas konteks**: memori yang disuntik ke system prompt dibatasi 6.000 karakter (bagian terbaru) dan daftar skill maks 40.
 - **Tool isolation**: exception di tool diubah jadi string `{"error": ...}`, agent tetap hidup.
 - **Provider error** ditangkap dan di-redaksi, tidak membocorkan API key ke log.
-- **Gateway**: tanpa token jangan diekspos publik; aktifkan `LACTION_GATEWAY_TOKEN` + reverse proxy.
+- **Gateway**: tanpa token jangan diekspos publik; aktifkan `LACTION_GATEWAY_TOKEN` + reverse proxy. Gateway masih CORS `*`, tanpa TLS/rate-limit.
 - `data/`, `.env`, `config.yaml`, `*.db*`, `*.log` sudah di-`.gitignore`.
+
+> `run_terminal` masih berupa `shell=True` + daftar blokir, **bukan sandbox**. Untuk produksi dengan LLM sungguhan, rencanakan backend Docker/SSH. Lihat [`docs/REVIEW.md`](docs/REVIEW.md) §6.
 
 ---
 
@@ -248,7 +257,9 @@ pip install -e ".[dev]"
 python3 -m pytest -q
 ```
 
-Test mencakup config precedence, tool registry, file guard, loop mock (tidak infinite loop), memory lintas sesi, skill creation, delegasi, context compressor, routing CLI, dan helper gateway.
+**47 test** mencakup config precedence, tool registry, file guard, loop mock, memory lintas sesi, skill creation, delegasi, context compressor, routing CLI, helper gateway, dan regresi keamanan (`tests/test_review_fixes.py`): terminal-chain, SSRF, redaksi, cron, batas prompt.
+
+`laction doctor` juga ikut memverifikasi 3 guard keamanan (redaksi, terminal, SSRF).
 
 CI GitHub Actions (`.github/workflows/ci.yml`) otomatis jalan di **Python 3.11 / 3.12 / 3.13** untuk setiap push & pull request: compile, unittest, `doctor`, editable install, smoke test entry point `laction`, dan smoke test HTTP gateway.
 
@@ -256,15 +267,15 @@ CI GitHub Actions (`.github/workflows/ci.yml`) otomatis jalan di **Python 3.11 /
 
 ## 10. Batasan & roadmap
 
-Belum ada (sengaja, supaya inti tetap ringan): MCP client, Honcho/remote memory, DSPy/GEPA optimisasi skill, backend Docker/SSH/Modal, adapter WhatsApp/Telegram/Slack, dan multi-user auth.
+Belum ada (sengaja, supaya inti tetap ringan): MCP client, Honcho/remote memory, DSPy/GEPA optimisasi skill, backend Docker/SSH/Modal, adapter WhatsApp/Telegram/Slack, dan multi-user auth. Daftar risiko residual lengkap ada di [`docs/REVIEW.md`](docs/REVIEW.md) §6.
 
-Rencana lanjutan yang paling masuk akal:
+Rencana lanjutan paling masuk akal (berurutan sesuai prioritas review):
 
-1. `MCPClient` + tool discovery dinamis.
-2. FTS5 asli untuk `memory_search` (saat ini `LIKE`).
-3. `SubagentPool` paralel dengan batas konkurensi.
-4. Backend eksekusi `DockerExecutor` untuk isolasi `run_terminal`.
-5. Gateway adapter (CLI sudah ada, tinggal tambah webhook).
+1. **Sandbox eksekusi** (`DockerExecutor`) — penting sebelum memasang LLM sungguhan.
+2. FTS5 asli untuk `memory_search` + `memory prune` (saat ini `LIKE`, dan `MEMORY.md` append-only).
+3. Observability tool: simpan nama/durasi/exit code terstruktur, bukan string di `messages.content`.
+4. `SubagentPool` paralel dengan batas konkurensi + timeout.
+5. `MCPClient` + tool discovery dinamis, lalu gateway adapter (webhook).
 
 ---
 

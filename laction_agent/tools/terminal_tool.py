@@ -1,20 +1,40 @@
 """Tool terminal: jalankan perintah shell dengan approval & timeout."""
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
 from .registry import get_registry
 
+# Frasa berbahaya. Dicek sebagai token utuh di seluruh command, bukan cuma
+# di awal string — supaya `echo aman; rm -rf /tmp/x` tidak lolos.
 DANGEROUS = (
-    "rm -rf", "mkfs", "dd ", ":(){", "shutdown", "reboot", "halt", "poweroff",
-    "chmod -r /", "chown -r /", "curl", "wget", "sudo ", "git push --force",
+    "rm -rf", "rm -fr", "rm -r /", "rm --recursive-force",
+    "mkfs", "dd if=", "dd of=", ":(){", "shutdown", "reboot", "halt", "poweroff",
+    "chmod -r /", "chown -r /", "curl", "wget", "sudo",
+    "git push --force", "git push -f", ">/dev/sd",
+)
+_DANGEROUS_RE = tuple(
+    re.compile(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", re.IGNORECASE)
+    for phrase in DANGEROUS
 )
 
 
 def _is_dangerous(cmd: str) -> bool:
-    c = f" {cmd.lower().strip()} "
-    return any(f" {d} " in c or c.strip().startswith(d) for d in DANGEROUS)
+    """Deteksi perintah berbahaya, termasuk yang disisipkan lewat chaining.
+
+    Review menemukan bypass pada versi lama: `echo $(curl ...)`,
+    ``echo `rm -rf /tmp/x` ``, dan `printf x; dd if=...` lolos karena
+    pengecekan hanya `startswith` / substring berspasi ganda.
+    """
+    text = (cmd or "").lower().strip()
+    if not text:
+        return False
+    # Substitusi perintah menyembunyikan eksekusi di dalam argumen.
+    if "$(" in text or "`" in text:
+        return True
+    return any(pattern.search(text) for pattern in _DANGEROUS_RE)
 
 
 reg = get_registry()
