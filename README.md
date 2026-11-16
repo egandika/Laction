@@ -123,7 +123,7 @@ laction gateway --host 0.0.0.0 --port 8000
 # buka http://localhost:8000  (atau URL preview 0.0.0.0 bila di sandbox)
 ```
 
-Endpoint: `GET /health`, `/config`, `/tools`, `/skills`, `/memory`, `/history?session_id=...`, `/cron`, `/traces?session_id=...`, `/mcp`; `POST /chat`, `/cron`, `/memory` (termasuk `{"action":"prune"}`), `/reset`. UI punya tombol **Traces**, **MCP**, dan **Prune memory**.
+Endpoint: `GET /health`, `/config`, `/tools`, `/skills`, `/memory`, `/history?session_id=...`, `/cron`, `/traces?session_id=...`, `/mcp`; `POST /chat`, `/cron`, `/memory` (termasuk `{"action":"prune"}`), `/reset`. UI punya tombol **Traces**, **MCP**, **Prune memory**, **Prune traces**, dan **Uji koneksi** MCP.
 
 Contoh API:
 
@@ -301,7 +301,7 @@ python3 -m pytest -q
 
 **146 test** mencakup config/provider (termasuk Gemini), tool registry, file guard, loop mock, memory, skills, delegasi, context compressor, CLI/gateway, Python approval, BM25 RAG, parser DuckDuckGo, APK text/binary AXML + zip-slip guard, routing mock, serta paket terbaru: FTS5 + `prune` + redaksi terpusat, `tool_events`/metrics, workspace eksplisit, flag `DockerExecutor`, deadline tim, dan roundtrip MCP stdio (`tests/test_next_packages.py`).
 
-`laction doctor` juga memverifikasi guard keamanan & kemampuan baru: redaksi, terminal chain/substitusi, SSRF, approval Python, path RAG, FTS5, `memory prune`, redaksi memory, `tool_events`, workspace eksplisit, backend sandbox, registry MCP, dan roundtrip server MCP demo.
+`laction doctor` (25 check) juga memverifikasi guard keamanan & kemampuan baru: redaksi, terminal chain/substitusi, SSRF, approval Python, path RAG, FTS5, `memory prune`, redaksi memory, `tool_events`, workspace eksplisit, backend sandbox, registry MCP, roundtrip server MCP demo, `journal_mode=WAL`, retensi `tool_events`, pemulihan DB korup, dan allowlist tool MCP.
 
 CI GitHub Actions (`.github/workflows/ci.yml`) otomatis jalan di **Python 3.11 / 3.12 / 3.13** untuk setiap push & pull request: compile, unittest, `doctor`, editable install, smoke test entry point `laction`, dan smoke test HTTP gateway.
 

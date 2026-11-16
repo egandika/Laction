@@ -867,6 +867,47 @@ def cmd_doctor(cfg: Config) -> int:
     except Exception as e:  # noqa: BLE001
         checks.append(("MCP stdio client", False, str(e)))
 
+    # Hardening: SQLite WAL/pemulihan, allowlist tool MCP, retensi observability.
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = SessionDB(Path(tmp))
+            with db._connect() as conn:
+                journal = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+            checks.append(("SQLite WAL", journal == "wal", f"journal_mode={journal}"))
+
+            sid = db.new_session()
+            for i in range(6):
+                db.record_tool_event(sid, f"t{i}", "ok", i, "{}", "ok")
+            db.save(sid, "user", "riwayat tetap")
+            pruned = db.prune_tool_events(keep=2)
+            checks.append((
+                "Retensi tool_events",
+                pruned["after"] == 2 and bool(db.search("riwayat")),
+                f"{pruned['before']} → {pruned['after']} event, chat utuh",
+            ))
+    except Exception as e:  # noqa: BLE001
+        checks.append(("SQLite WAL", False, str(e)))
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "sessions.db"
+            db_path.write_bytes(b"bukan sqlite" * 64)
+            recovered = SessionDB(Path(tmp))
+            checks.append((
+                "DB korup dipulihkan",
+                bool(recovered.recovered_from) and Path(recovered.recovered_from).exists(),
+                "dikarantina lalu dibuat ulang",
+            ))
+            registry = MCPRegistry(Path(tmp))
+            registry.add_server("demo", sys.executable, ["-m", "laction_agent.mcp.demo_server"], tools=["ping"])
+            checks.append((
+                "MCP allowlist tool",
+                registry.get("demo")["tools"] == ["ping"],
+                "tool di luar daftar ditolak sebelum approval",
+            ))
+    except Exception as e:  # noqa: BLE001
+        checks.append(("DB korup dipulihkan", False, str(e)))
+
     if cfg.provider == "mock":
         checks.append(("API key", True, "tidak dibutuhkan (mock)"))
     else:

@@ -521,6 +521,10 @@ class CliAndSurfaceTests(unittest.TestCase):
         self.assertIn('data-get="/traces"', HTML)
         self.assertIn('data-get="/mcp"', HTML)
         self.assertIn("prune", HTML)
+        # Tombol aksi baru: retensi traces + probe MCP.
+        self.assertIn('id="prune-traces"', HTML)
+        self.assertIn('id="mcp-probe"', HTML)
+        self.assertIn("sandbox=", HTML)
         self.assertNotIn("localhost", HTML)
         self.assertNotIn("127.0.0.1", HTML)
 
