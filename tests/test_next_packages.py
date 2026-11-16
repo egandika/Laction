@@ -359,6 +359,23 @@ class CliAndSurfaceTests(unittest.TestCase):
         self.assertEqual(mcp_add.mcp_server_command, "python3")
         self.assertEqual(mcp_add.args, ["-m", "x"])
 
+    def test_mcp_add_splits_description_from_args(self):
+        from laction_agent import cli as cli_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = parse_args([
+                "mcp", "add", "--name", "demo", "--command", "python3",
+                "--args", "-m", "mod", "--description", "server demo",
+            ])
+            args.home = tmp
+            cfg = Config(home=tmp)
+            with mock.patch("builtins.print"):
+                code = cli_mod.cmd_mcp(cfg, args)
+            self.assertEqual(code, 0)
+            server = MCPRegistry(Path(tmp)).get("demo")
+            self.assertEqual(server["args"], ["-m", "mod"])
+            self.assertEqual(server["description"], "server demo")
+
     def test_build_parser_help_works(self):
         parser = build_parser()
         self.assertIn("traces", parser.format_help())

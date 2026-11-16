@@ -541,12 +541,21 @@ def cmd_mcp(cfg: Config, args: argparse.Namespace) -> int:
         return 0
 
     if command == "add":
+        raw_args = list(getattr(args, "args", []) or [])
+        description = getattr(args, "description", "") or ""
+        # `--args` memakai REMAINDER agar bisa memuat token berawalan '-' seperti
+        # `-m`; kalau user menaruh --description sesudahnya, pisahkan kembali.
+        if "--description" in raw_args:
+            idx = raw_args.index("--description")
+            if not description and idx + 1 < len(raw_args):
+                description = raw_args[idx + 1]
+            raw_args = raw_args[:idx]
         try:
             server = registry.add_server(
                 name=args.name,
                 command=args.mcp_server_command,
-                args=getattr(args, "args", []) or [],
-                description=getattr(args, "description", "") or "",
+                args=raw_args,
+                description=description,
             )
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)

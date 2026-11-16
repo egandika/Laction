@@ -295,7 +295,7 @@ pip install -e ".[dev]"
 python3 -m pytest -q
 ```
 
-**129 test** mencakup config/provider (termasuk Gemini), tool registry, file guard, loop mock, memory, skills, delegasi, context compressor, CLI/gateway, Python approval, BM25 RAG, parser DuckDuckGo, APK text/binary AXML + zip-slip guard, routing mock, serta paket terbaru: FTS5 + `prune` + redaksi terpusat, `tool_events`/metrics, workspace eksplisit, flag `DockerExecutor`, deadline tim, dan roundtrip MCP stdio (`tests/test_next_packages.py`).
+**130 test** mencakup config/provider (termasuk Gemini), tool registry, file guard, loop mock, memory, skills, delegasi, context compressor, CLI/gateway, Python approval, BM25 RAG, parser DuckDuckGo, APK text/binary AXML + zip-slip guard, routing mock, serta paket terbaru: FTS5 + `prune` + redaksi terpusat, `tool_events`/metrics, workspace eksplisit, flag `DockerExecutor`, deadline tim, dan roundtrip MCP stdio (`tests/test_next_packages.py`).
 
 `laction doctor` juga memverifikasi guard keamanan & kemampuan baru: redaksi, terminal chain/substitusi, SSRF, approval Python, path RAG, FTS5, `memory prune`, redaksi memory, `tool_events`, workspace eksplisit, backend sandbox, registry MCP, dan roundtrip server MCP demo.
 
