@@ -280,7 +280,8 @@ Skill bawaan (16): `repo-onboarding`, `code-review`, `release-notes`, `self-impr
 - **Batas konteks**: memory yang disuntik ke system prompt dibatasi 6.000 karakter terbaru; katalog skill maks 40 entri dan 2.200 karakter.
 - **Penanganan error tool** (bukan sandbox): exception di tool diubah jadi string `{"error": ...}`, agent tetap hidup.
 - **Provider error** ditangkap dan di-redaksi, tidak membocorkan API key ke log.
-- **Gateway**: tanpa token jangan diekspos publik; aktifkan `LACTION_GATEWAY_TOKEN` + reverse proxy. Gateway masih CORS `*`, tanpa TLS/rate-limit.
+- **Gateway**: tanpa token jangan diekspos publik; aktifkan `LACTION_GATEWAY_TOKEN` + reverse proxy. Gateway masih CORS `*`, tanpa TLS/rate-limit. Cache agent dibatasi 32 sesi (LRU) dan `/chat` memakai `run_lock` dengan batas tunggu 120 detik → `429` alih-alih menggantung tanpa batas.
+- **SQLite tahan gagal**: `sessions.db` memakai `journal_mode=WAL` + `busy_timeout` 10 detik, dan DB korup dikarantina (`sessions.db.corrupt-<timestamp>`) lalu dibuat ulang agar agent tidak mati total.
 - `data/`, `.env`, `config.yaml`, `*.db*`, `*.log` sudah di-`.gitignore`.
 
 > `run_terminal` masih berupa `shell=True` + daftar blokir, dan `run_python` menjalankan kode dengan hak user — keduanya **bukan sandbox**. Gunakan hanya di workspace tepercaya; untuk produksi rencanakan backend Docker/SSH. Lihat [`docs/REVIEW.md`](docs/REVIEW.md) §6.
@@ -296,7 +297,7 @@ pip install -e ".[dev]"
 python3 -m pytest -q
 ```
 
-**138 test** mencakup config/provider (termasuk Gemini), tool registry, file guard, loop mock, memory, skills, delegasi, context compressor, CLI/gateway, Python approval, BM25 RAG, parser DuckDuckGo, APK text/binary AXML + zip-slip guard, routing mock, serta paket terbaru: FTS5 + `prune` + redaksi terpusat, `tool_events`/metrics, workspace eksplisit, flag `DockerExecutor`, deadline tim, dan roundtrip MCP stdio (`tests/test_next_packages.py`).
+**142 test** mencakup config/provider (termasuk Gemini), tool registry, file guard, loop mock, memory, skills, delegasi, context compressor, CLI/gateway, Python approval, BM25 RAG, parser DuckDuckGo, APK text/binary AXML + zip-slip guard, routing mock, serta paket terbaru: FTS5 + `prune` + redaksi terpusat, `tool_events`/metrics, workspace eksplisit, flag `DockerExecutor`, deadline tim, dan roundtrip MCP stdio (`tests/test_next_packages.py`).
 
 `laction doctor` juga memverifikasi guard keamanan & kemampuan baru: redaksi, terminal chain/substitusi, SSRF, approval Python, path RAG, FTS5, `memory prune`, redaksi memory, `tool_events`, workspace eksplisit, backend sandbox, registry MCP, dan roundtrip server MCP demo.
 

@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -42,6 +43,8 @@ from .mcp.registry import MCPRegistry
 from .skills.manager import SkillManager
 from .tools.registry import get_registry
 from .utils import log, redact
+
+STARTED_AT = time.monotonic()
 
 HTML = r"""<!doctype html>
 <html lang="id">
@@ -211,6 +214,10 @@ api('/health').then(d => {
 """
 
 
+MAX_AGENT_SESSIONS = 32
+RUN_LOCK_TIMEOUT = 120.0
+
+
 def _json_default(obj):
     return str(obj)
 
@@ -280,9 +287,17 @@ def make_handler(
         def _get_agent(self, session_id: str | None) -> AIAgent:
             with agents_lock:
                 if session_id and session_id in agents:
-                    return agents[session_id]
+                    agent = agents[session_id]
+                    # LRU: sesi yang baru dipakai pindah ke urutan terakhir.
+                    agents.pop(session_id, None)
+                    agents[session_id] = agent
+                    return agent
                 agent = AIAgent(cfg, session_id=session_id or None)
                 agents[agent.session_id] = agent
+                # Buang sesi paling lama agar memori gateway tidak tumbuh tanpa batas.
+                while len(agents) > MAX_AGENT_SESSIONS:
+                    oldest = next(iter(agents))
+                    agents.pop(oldest, None)
                 return agent
 
         def do_OPTIONS(self):  # noqa: N802 — nama bawaan BaseHTTPRequestHandler
@@ -305,6 +320,9 @@ def make_handler(
                     "model": cfg.model,
                     "tools": len(get_registry().schemas()),
                     "cron_enabled": cfg.cron_enabled,
+                    "sessions_cached": len(agents),
+                    "sandbox_mode": cfg.sandbox_mode,
+                    "uptime_seconds": int(time.monotonic() - STARTED_AT),
                 })
             if not self._authorized():
                 return self._json(401, {"error": "Token gateway tidak valid."})
@@ -358,12 +376,20 @@ def make_handler(
                     return self._json(400, {"error": "Field 'message' wajib diisi."})
                 sid = str(data.get("session_id") or "").strip() or None
                 agent = self._get_agent(sid)
+                # Lock dengan batas tunggu: satu request lambat tidak boleh
+                # menggantung request lain tanpa batas waktu.
+                if not run_lock.acquire(timeout=RUN_LOCK_TIMEOUT):
+                    return self._json(429, {
+                        "error": "Agent masih sibuk menjalankan permintaan lain; coba lagi.",
+                        "retry_after_seconds": 5,
+                    })
                 try:
-                    with run_lock:
-                        reply = agent.run(message)
+                    reply = agent.run(message)
                 except Exception as e:  # noqa: BLE001
                     log.exception("Gateway /chat error")
                     return self._json(500, {"error": str(e)})
+                finally:
+                    run_lock.release()
                 return self._json(200, {"reply": reply, "session_id": agent.session_id})
 
             if path == "/cron":

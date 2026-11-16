@@ -17,6 +17,9 @@ from pathlib import Path
 from ..utils import redact, truncate
 
 _FTS_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+# Batas waktu tunggu lock SQLite: dua proses (cron + gateway) bisa menulis
+# bersamaan, dan default 5 detik terlalu cepat untuk DB yang sedang di-backfill.
+SQLITE_TIMEOUT_SECONDS = 10.0
 
 
 class SessionDB:
@@ -25,15 +28,60 @@ class SessionDB:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._prefer_fts = enable_fts
         self.fts_enabled = False
+        self.recovered_from = ""
+        self.last_error = ""
         self._init()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=SQLITE_TIMEOUT_SECONDS)
         conn.row_factory = sqlite3.Row
+        # WAL: pembaca (traces/history) tidak memblokir penulis (agent run) dan
+        # tahan terhadap dua proses memakai HOME yang sama.
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.DatabaseError:
+            # DB korup/terkunci: biarkan lapisan _init yang memutuskan pemulihan.
+            pass
         return conn
 
     def _init(self):
-        with self._connect() as conn:
+        try:
+            conn = self._connect()
+            try:
+                self._init_schema(conn)
+            finally:
+                conn.close()
+            return
+        except sqlite3.DatabaseError as exc:
+            # DB korup: karantina sekali, lalu buat ulang agar agent tidak mati total.
+            if not self._recover_corrupt_db(exc):
+                raise
+        conn = self._connect()
+        try:
+            self._init_schema(conn)
+        finally:
+            conn.close()
+
+    def _recover_corrupt_db(self, exc: Exception) -> bool:
+        stamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        quarantined = self.db_path.with_name(f"{self.db_path.name}.corrupt-{stamp}")
+        try:
+            self.db_path.rename(quarantined)
+            # Sidecar WAL/SHM ikut dipindah agar tidak menempel ke DB baru.
+            for suffix in ("-wal", "-shm"):
+                sidecar = self.db_path.with_name(self.db_path.name + suffix)
+                if sidecar.exists():
+                    sidecar.rename(sidecar.with_name(sidecar.name + f".corrupt-{stamp}"))
+        except OSError:
+            return False
+        self.fts_enabled = False
+        self.recovered_from = str(quarantined)
+        self.last_error = str(exc)
+        return True
+
+    def _init_schema(self, conn: sqlite3.Connection) -> None:
+        with conn:
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS messages (
                     id TEXT PRIMARY KEY,

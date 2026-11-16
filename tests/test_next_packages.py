@@ -134,6 +134,24 @@ class SessionFTS5Tests(unittest.TestCase):
         tools = {row["tool"] for row in metrics["by_tool"]}
         self.assertEqual(tools, {"read_file", "run_terminal", "rag_search"})
 
+    def test_wal_mode_and_timeout_configured(self):
+        with self._connect_guard() as conn:
+            self.assertEqual(str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower(), "wal")
+
+    def _connect_guard(self):
+        return self.db._connect()
+
+    def test_corrupt_db_is_quarantined_not_fatal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / "sessions.db").write_bytes(b"ini bukan sqlite" * 100)
+            db = SessionDB(home)
+            sid = db.new_session()
+            db.save(sid, "user", "setelah pemulihan")
+            self.assertTrue(db.search("pemulihan"))
+            self.assertTrue(db.recovered_from)
+            self.assertTrue(Path(db.recovered_from).exists())
+
     def test_tool_event_preview_redacted(self):
         self.db.record_tool_event(self.sid, "run_terminal", "ok", 1, "api_key=rahasia-banget", "ok")
         event = self.db.tool_events(self.sid)[0]
@@ -579,6 +597,25 @@ class GatewayEndpointTests(unittest.TestCase):
         status, data = self._get(port, "/mcp")
         self.assertEqual(status, 200)
         self.assertEqual(data["servers"][0]["name"], "demo")
+
+    def test_health_reports_new_fields(self):
+        port = self._start()
+        status, data = self._get(port, "/health")
+        self.assertEqual(status, 200)
+        self.assertIn("sessions_cached", data)
+        self.assertIn("sandbox_mode", data)
+        self.assertGreaterEqual(data["uptime_seconds"], 0)
+
+    def test_agent_cache_is_bounded(self):
+        from laction_agent import gateway as gw
+
+        port = self._start()
+        self.assertLessEqual(gw.MAX_AGENT_SESSIONS, 64)
+        for _ in range(3):
+            status, data = self._post(port, "/chat", {"message": "list file"})
+            self.assertEqual(status, 200)
+        _, health = self._get(port, "/health")
+        self.assertLessEqual(health["sessions_cached"], gw.MAX_AGENT_SESSIONS)
 
     def test_mcp_probe_endpoint(self):
         import sys as _sys
