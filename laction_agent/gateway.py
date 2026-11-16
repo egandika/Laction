@@ -13,6 +13,7 @@ Endpoint:
 - `GET  /traces?sid=`    tool events + metrics (observability)
 - `GET  /mcp`            server MCP terdaftar (allowlist + allowlist per-tool)
 - `POST /mcp`            {name} -> uji koneksi server (initialize + tools/list)
+- `POST /traces`         {keep} -> retensi tool_events
 - `POST /chat`           {message, session_id?} -> {reply, session_id}
 - `POST /cron`           {name, task, interval_seconds}
 - `POST /memory`         {note, target: memory|user} atau {action:"prune", ...}
@@ -433,6 +434,19 @@ def make_handler(
                     "redacted": bool(stored) and stored != " ".join(note.splitlines()).strip(),
                     "visible_chars": raw_len,
                 })
+
+            if path == "/traces":
+                # Retensi: hapus tool_events lama (riwayat chat tidak disentuh).
+                db = SessionDB(home)
+                try:
+                    keep = int(data.get("keep") or 10_000)
+                except (TypeError, ValueError):
+                    return self._json(400, {"error": "keep harus angka."})
+                try:
+                    keep = min(max(keep, 0), 1_000_000)
+                except TypeError:
+                    return self._json(400, {"error": "keep tidak valid."})
+                return self._json(200, {"ok": True, "pruned": db.prune_tool_events(keep=keep)})
 
             if path == "/mcp":
                 # Uji koneksi satu server MCP dari UI, hanya server di allowlist.

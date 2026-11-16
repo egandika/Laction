@@ -105,6 +105,7 @@ laction skills code-review                  # lihat isi SKILL.md
 laction memory add "repo ini pakai stdlib"
 laction memory prune --max-entries 50 --max-chars 6000
 laction traces --limit 20                   # durasi & status tiap panggilan tool
+laction traces --prune --keep 10000          # retensi: simpan 10k event terbaru
 laction mcp add --name demo --command python3 --args -m laction_agent.mcp.demo_server \
   --allow-tools ping workspace_summary            # allowlist per-tool (opsional tapi disarankan)
 laction mcp list | tools --name demo | allow --name demo --tools ping | remove --name demo
@@ -281,6 +282,7 @@ Skill bawaan (16): `repo-onboarding`, `code-review`, `release-notes`, `self-impr
 - **Penanganan error tool** (bukan sandbox): exception di tool diubah jadi string `{"error": ...}`, agent tetap hidup.
 - **Provider error** ditangkap dan di-redaksi, tidak membocorkan API key ke log.
 - **Gateway**: tanpa token jangan diekspos publik; aktifkan `LACTION_GATEWAY_TOKEN` + reverse proxy. Gateway masih CORS `*`, tanpa TLS/rate-limit. Cache agent dibatasi 32 sesi (LRU) dan `/chat` memakai `run_lock` dengan batas tunggu 120 detik → `429` alih-alih menggantung tanpa batas.
+- **Retensi observability**: `tool_events` bisa dipangkas dengan `laction traces --prune --keep N` atau `POST /traces {"keep": N}`; riwayat chat di tabel `messages` tidak disentuh. `laction status` menampilkan jumlah pesan/sesi/event + ukuran DB.
 - **SQLite tahan gagal**: `sessions.db` memakai `journal_mode=WAL` + `busy_timeout` 10 detik, dan DB korup dikarantina (`sessions.db.corrupt-<timestamp>`) lalu dibuat ulang agar agent tidak mati total.
 - `data/`, `.env`, `config.yaml`, `*.db*`, `*.log` sudah di-`.gitignore`.
 
@@ -297,7 +299,7 @@ pip install -e ".[dev]"
 python3 -m pytest -q
 ```
 
-**142 test** mencakup config/provider (termasuk Gemini), tool registry, file guard, loop mock, memory, skills, delegasi, context compressor, CLI/gateway, Python approval, BM25 RAG, parser DuckDuckGo, APK text/binary AXML + zip-slip guard, routing mock, serta paket terbaru: FTS5 + `prune` + redaksi terpusat, `tool_events`/metrics, workspace eksplisit, flag `DockerExecutor`, deadline tim, dan roundtrip MCP stdio (`tests/test_next_packages.py`).
+**146 test** mencakup config/provider (termasuk Gemini), tool registry, file guard, loop mock, memory, skills, delegasi, context compressor, CLI/gateway, Python approval, BM25 RAG, parser DuckDuckGo, APK text/binary AXML + zip-slip guard, routing mock, serta paket terbaru: FTS5 + `prune` + redaksi terpusat, `tool_events`/metrics, workspace eksplisit, flag `DockerExecutor`, deadline tim, dan roundtrip MCP stdio (`tests/test_next_packages.py`).
 
 `laction doctor` juga memverifikasi guard keamanan & kemampuan baru: redaksi, terminal chain/substitusi, SSRF, approval Python, path RAG, FTS5, `memory prune`, redaksi memory, `tool_events`, workspace eksplisit, backend sandbox, registry MCP, dan roundtrip server MCP demo.
 
