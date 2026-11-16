@@ -29,7 +29,7 @@ ENV_MAP = {
 }
 
 VALID_PROVIDERS = {
-    "mock", "openai", "openrouter", "ollama", "nous", "openai_compat", "custom"
+    "mock", "openai", "openrouter", "ollama", "nous", "gemini", "openai_compat", "custom"
 }
 VALID_APPROVAL_MODES = {"smart", "always", "never"}
 
@@ -100,7 +100,7 @@ class Config:
 
     def warnings(self) -> list[str]:
         out: list[str] = []
-        if self.provider in {"openai", "openrouter", "nous"} and not self.api_key:
+        if self.provider in {"openai", "openrouter", "nous", "gemini"} and not self.api_key:
             out.append("LACTION_API_KEY belum diisi — provider kemungkinan besar akan menolak request.")
         if self.provider != "mock" and self.model.startswith("mock"):
             out.append("LACTION_MODEL masih 'mock-laction-1'; ganti ke model asli untuk provider ini.")

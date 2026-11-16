@@ -65,5 +65,5 @@ def get_registry() -> ToolRegistry:
     if _registry is None:
         _registry = ToolRegistry()
         # Import di sini supaya tool mendaftar sendiri (hindari circular import)
-        from . import cron_tool, delegate_tool, file_tools, memory_tool, skills_tool, system_tool, terminal_tool, web_tools  # noqa: F401
+        from . import apk_tools, cron_tool, delegate_tool, file_tools, memory_tool, python_tool, rag_tool, search_tool, skills_tool, system_tool, terminal_tool, web_tools  # noqa: F401
     return _registry

@@ -15,7 +15,7 @@ Repo ini awalnya hanya berisi `README.md`, jadi saya rancang agent yang:
 | Bisa dicoba sekarang juga | `MockProvider` memahami perintah Bahasa Indonesia sederhana & menjalankan tools sungguhan |
 | Tidak ribet install | Python 3.11+ **stdlib saja** (`urllib`, `sqlite3`, `http.server`, `argparse`) |
 | Data tetap milik user | `MEMORY.md`, `USER.md`, `sessions.db`, `skills/`, `cron.json` di `LACTION_HOME` (default `./data`, di-gitignore) |
-| Model-agnostic | Satu interface `BaseProvider`; OpenAI / OpenRouter / Ollama / Nous / endpoint custom lewat format Chat Completions |
+| Model-agnostic | Satu interface `BaseProvider`; OpenAI / OpenRouter / Gemini / Ollama / Nous / endpoint custom lewat format Chat Completions |
 | Bisa tumbuh | Agent bisa menulis `SKILL.md` baru dari pengalaman (*closed learning loop*) |
 | Aman dipakai di repo | Path traversal dicegah, terminal punya `approval_mode`, tool error tidak bikin agent crash |
 | Bukan cuma CLI | Ada Gateway HTTP + UI chat vanila JS, plus cron scheduler |
@@ -26,14 +26,15 @@ Repo ini awalnya hanya berisi `README.md`, jadi saya rancang agent yang:
 |---|---|
 | Surface / Gateway | `cli.py`, `gateway.py` (HTTP + UI) |
 | Session / Profile | `Config.home` + `LACTION_HOME`, `SessionDB` (SQLite) |
-| Reasoning | `providers/` (`mock`, `openai_compat`) |
-| Memory | `memory/` (Tier 1 Markdown + Tier 2 SQLite) |
+| Reasoning | `providers/` (`mock`, OpenAI-compatible: OpenAI/OpenRouter/Gemini/Ollama/Nous) |
+| Memory | `memory/` (Tier 1 Markdown + Tier 2 SQLite + workspace BM25 RAG) |
 | Skill | `skills/` (`SKILL.md` bawaan + buatan agent) |
-| Execution | `tools/` (file, terminal, web, memory, skill, cron, delegasi) |
+| Execution | `tools/` (file, shell/Python, web search/fetch, local RAG, APK statis, memory/skill, cron, delegasi) |
 
 Dokumen lanjutan:
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — desain mendalam, diagram Mermaid, trace satu turn.
 - [`docs/REVIEW.md`](docs/REVIEW.md) — **review kode**: penjelasan cara kerja tiap bagian, 9 temuan bug (termasuk 3 celah keamanan), perbaikan, dan risiko residual.
+- [`docs/SKILLS.md`](docs/SKILLS.md) — analisis riset daftar skill, fitur yang dipilih/ditunda, batasan, dan sumber.
 
 ---
 
@@ -80,6 +81,10 @@ laction "jalankan git status --short"
 laction "ingat: saya lebih suka Bahasa Indonesia"
 laction "apa yang kamu ingat?"
 laction "cari ingatan kopi"
+laction "RAG search: konfigurasi provider"      # retrieval lokal, BM25
+laction "cari web: dokumentasi Python 3.13"       # query keluar ke DuckDuckGo
+laction "analisis APK aplikasi.apk"               # APK milik/yang boleh diaudit
+laction chat                                     # di dalam chat: Python: print(1 + 1), perlu approval
 laction "list skill"
 laction "lihat skill repo-onboarding"
 laction "buat skill ringkas-repo: 1. list file 2. baca README 3. simpan ringkasan"
@@ -154,12 +159,13 @@ Provider yang didukung:
 |---|---|---|
 | `mock` | – | Tanpa jaringan, untuk demo/test |
 | `openai` | `https://api.openai.com/v1` | Butuh API key |
-| `openrouter` | `https://openrouter.ai/api/v1` | Butuh API key |
+| `openrouter` | `https://openrouter.ai/api/v1` | Butuh API key; pilih model di OpenRouter |
+| `gemini` | `https://generativelanguage.googleapis.com/v1beta/openai` | Endpoint Gemini OpenAI-compatible; butuh API key + nama model |
 | `nous` | `https://inference-api.nousresearch.com/v1` | Butuh API key |
 | `ollama` | `http://localhost:11434/v1` | Lokal, tanpa key |
 | `custom` / `openai_compat` | **wajib diisi** | Endpoint apa pun yang kompatibel dengan Chat Completions + `tools` |
 
-Semua provider non-mock memakai `urllib` (tanpa `requests`). Format tool mengikuti OpenAI function calling, jadi ganti provider tidak mengubah tool registry.
+Semua provider non-mock memakai `urllib` (tanpa `requests`). Format tool mengikuti OpenAI function calling, jadi ganti provider tidak mengubah tool registry. Gemini memakai compatibility endpoint resminya; kemampuan khusus tiap model/provider bisa berbeda.
 
 ---
 
@@ -170,6 +176,7 @@ Laction/
 ├── README.md                  # dokumen ini
 ├── docs/ARCHITECTURE.md       # desain mendalam + diagram alur
 ├── docs/REVIEW.md             # review kode, temuan bug & perbaikan
+├── docs/SKILLS.md             # analisis daftar skill, riset & scope fitur
 ├── pyproject.toml             # packaging, entry point `laction`, pytest config
 ├── .env.example               # template environment
 ├── config.yaml.example        # template config YAML
@@ -183,23 +190,26 @@ Laction/
 │   ├── context_compressor.py  # ringkas riwayat, jaga tool-call pairing
 │   ├── agent.py               # 🔁 loop utama + sub-agent delegation
 │   ├── gateway.py             # HTTP API + UI chat (stdlib http.server)
-│   ├── providers/             # BaseProvider, MockProvider, OpenAICompatProvider
-│   ├── tools/                 # registry + 20 tool (self-register via decorator)
+│   ├── providers/             # BaseProvider + mock/OpenAI-compatible (termasuk Gemini)
+│   ├── tools/                 # registry + 25 tool (self-register via decorator)
 │   ├── memory/                # MemoryManager (Markdown) + SessionDB (SQLite)
-│   ├── skills/                # SkillManager + 4 skill bawaan (SKILL.md)
+│   ├── skills/                # SkillManager + 13 skill bawaan (SKILL.md)
 │   └── cron/                  # CronScheduler (cron.json + thread)
 └── tests/                     # unittest, juga bisa jalan via pytest
 ```
 
 ---
 
-## 6. Daftar tool
+## 6. Daftar tool (25)
 
 | Tool | Fungsi |
 |---|---|
-| `read_file`, `write_file`, `list_files`, `search_files` | Akses file workspace (dengan guard path traversal) |
-| `run_terminal` | Shell 30 detik + approval + blokir perintah berbahaya |
-| `web_fetch` | Ambil halaman web publik jadi teks polos (alamat privat ditolak) |
+| `read_file`, `write_file`, `list_files`, `search_files` | Akses file workspace dengan guard path traversal |
+| `run_terminal` | Shell lokal 30 detik, approval, dan guard perintah berbahaya |
+| `run_python` | Runner kode Python, timeout 1–30 detik, **persetujuan eksplisit selalu**; bukan sandbox |
+| `web_search`, `web_fetch` | Pencarian DDG best-effort + baca halaman publik; pencarian mengirim query ke DDG |
+| `rag_search` | Retrieval lokal BM25 pada file teks, mengembalikan path/baris (bukan vector embeddings) |
+| `apk_analyze`, `apk_extract` | Triage APK read-only + ekstraksi satu entry terbatas; APK tidak dijalankan |
 | `memory_save`, `memory_read`, `user_save` | Tier-1 memory: `MEMORY.md` / `USER.md` |
 | `memory_search` | Tier-2: cari riwayat sesi di SQLite |
 | `list_skills`, `view_skill`, `create_skill` | Procedural memory / self-improvement |
@@ -222,9 +232,9 @@ tugas selesai
                     system prompt sesi berikutnya memuat memory + daftar skill
 ```
 
-Skill bawaan: `repo-onboarding`, `code-review`, `release-notes`, `self-improvement`.
+Skill bawaan (13): `repo-onboarding`, `code-review`, `release-notes`, `self-improvement`, `planning`, `reflection`, `python-debugging`, `git-workflow`, `android-apk-static-analysis`, `local-rag`, `public-web-research`, `provider-setup`, `productivity-workflows`.
 
-`SKILL.md` memakai frontmatter `name` + `description` (konvensi agentskills.io), jadi mudah dipindah ke agent lain.
+`SKILL.md` memakai frontmatter `name` + `description` mengikuti [Agent Skills spec](https://agentskills.io/specification): katalog ringkas dimuat saat sesi, isi lengkap dibaca via `view_skill` bila diperlukan. Skill bawaan divalidasi namanya/frontmatter-nya oleh test.
 
 ---
 
@@ -232,19 +242,23 @@ Skill bawaan: `repo-onboarding`, `code-review`, `release-notes`, `self-improveme
 
 - **Workspace guard**: `read_file`/`write_file`/`list_files` menolak path yang `.resolve()` keluar dari workspace.
 - **Approval mode**:
-  - `smart` (default): hanya perintah berbahaya yang minta persetujuan di REPL.
-  - `always`: semua `run_terminal` minta persetujuan.
-  - `never`: perintah berbahaya diblokir total (prompt persetujuan dimatikan).
+  - `smart` (default): perintah shell berbahaya minta persetujuan; `run_python` selalu minta persetujuan eksplisit.
+  - `always`: semua `run_terminal` dan `run_python` minta persetujuan.
+  - `never`: shell berbahaya dan seluruh `run_python` diblokir.
 - **Deteksi perintah berbahaya** mencakup rangkaian `;`, `&&`, `||`, `|`, substitusi `$(...)` dan backtick — bukan cuma kata pertama.
 - **SSRF guard**: `web_fetch` menolak loopback/private/link-local/`localhost`/`.internal`, termasuk hasil DNS. Opt-out: `LACTION_ALLOW_PRIVATE_WEB=1`.
-- **Redaksi secret**: token `sk-*`, `ghp_*`, `github_pat_*`, `xox*-*`, `AIza*`, `Bearer ...`, dan `api_key=...` disamarkan sebelum masuk log, `sessions.db`, `MEMORY.md`, `USER.md`, maupun `SKILL.md`.
-- **Batas konteks**: memori yang disuntik ke system prompt dibatasi 6.000 karakter (bagian terbaru) dan daftar skill maks 40.
+- **Web search**: `web_search` memakai HTML DuckDuckGo yang tidak resmi, bisa rate-limit/berubah; query dikirim ke pihak ketiga. Pola credential umum ditolak, tetapi jangan kirim secret/data privat.
+- **Python runner**: `run_python` tidak memakai shell tetapi tetap arbitrary code dengan hak user, bukan sandbox; selalu fail-closed tanpa approval interaktif.
+- **APK tools**: `apk_analyze` hanya membaca ZIP/AXML/strings dengan batas ukuran, `apk_extract` menulis satu entry ke workspace; tidak menjalankan APK dan bukan pengganti audit penuh.
+- **RAG**: `rag_search` hanya file teks lokal yang diizinkan, mengecualikan `data/`, hidden dirs, `.git`, virtualenv, dan output build; retrieval BM25 leksikal, bukan vector.
+- **Redaksi secret**: token `sk-*`, `ghp_*`, `github_pat_*`, `xox*-*`, `AKIA...`, `AIza*`, `Bearer ...`, dan `api_key=...` disamarkan sebelum masuk log, `sessions.db`, `MEMORY.md`, `USER.md`, maupun `SKILL.md`.
+- **Batas konteks**: memory yang disuntik ke system prompt dibatasi 6.000 karakter terbaru; katalog skill maks 40 entri dan 2.200 karakter.
 - **Tool isolation**: exception di tool diubah jadi string `{"error": ...}`, agent tetap hidup.
 - **Provider error** ditangkap dan di-redaksi, tidak membocorkan API key ke log.
 - **Gateway**: tanpa token jangan diekspos publik; aktifkan `LACTION_GATEWAY_TOKEN` + reverse proxy. Gateway masih CORS `*`, tanpa TLS/rate-limit.
 - `data/`, `.env`, `config.yaml`, `*.db*`, `*.log` sudah di-`.gitignore`.
 
-> `run_terminal` masih berupa `shell=True` + daftar blokir, **bukan sandbox**. Untuk produksi dengan LLM sungguhan, rencanakan backend Docker/SSH. Lihat [`docs/REVIEW.md`](docs/REVIEW.md) §6.
+> `run_terminal` masih berupa `shell=True` + daftar blokir, dan `run_python` menjalankan kode dengan hak user — keduanya **bukan sandbox**. Gunakan hanya di workspace tepercaya; untuk produksi rencanakan backend Docker/SSH. Lihat [`docs/REVIEW.md`](docs/REVIEW.md) §6.
 
 ---
 
@@ -257,9 +271,9 @@ pip install -e ".[dev]"
 python3 -m pytest -q
 ```
 
-**47 test** mencakup config precedence, tool registry, file guard, loop mock, memory lintas sesi, skill creation, delegasi, context compressor, routing CLI, helper gateway, dan regresi keamanan (`tests/test_review_fixes.py`): terminal-chain, SSRF, redaksi, cron, batas prompt.
+**63 test** mencakup config/provider (termasuk Gemini), tool registry, file guard, loop mock, memory, skills, delegasi, context compressor, CLI/gateway, Python approval, BM25 RAG, parser DuckDuckGo, APK text/binary AXML + zip-slip guard, routing mock, dan regresi keamanan (`tests/test_review_fixes.py`, `tests/test_added_capabilities.py`).
 
-`laction doctor` juga ikut memverifikasi 3 guard keamanan (redaksi, terminal, SSRF).
+`laction doctor` juga memverifikasi 5 guard keamanan (redaksi, terminal, SSRF, approval Python, path RAG).
 
 CI GitHub Actions (`.github/workflows/ci.yml`) otomatis jalan di **Python 3.11 / 3.12 / 3.13** untuk setiap push & pull request: compile, unittest, `doctor`, editable install, smoke test entry point `laction`, dan smoke test HTTP gateway.
 
@@ -267,7 +281,7 @@ CI GitHub Actions (`.github/workflows/ci.yml`) otomatis jalan di **Python 3.11 /
 
 ## 10. Batasan & roadmap
 
-Belum ada (sengaja, supaya inti tetap ringan): MCP client, Honcho/remote memory, DSPy/GEPA optimisasi skill, backend Docker/SSH/Modal, adapter WhatsApp/Telegram/Slack, dan multi-user auth. Daftar risiko residual lengkap ada di [`docs/REVIEW.md`](docs/REVIEW.md) §6.
+Belum ada (sengaja, supaya inti tetap ringan): MCP client/server, Honcho/remote memory, vector embeddings, optimisasi skill DSPy/GEPA, backend sandbox Docker/SSH/Modal, adapter WhatsApp/Telegram, multi-user auth, analisis APK dinamis (Frida/Logcat), YouTube transcript, image generation/analysis, dan speech-to-text/text-to-speech. Daftar keputusan + alasan ada di [`docs/SKILLS.md`](docs/SKILLS.md); risiko residual keamanan ada di [`docs/REVIEW.md`](docs/REVIEW.md) §6.
 
 Rencana lanjutan paling masuk akal (berurutan sesuai prioritas review):
 

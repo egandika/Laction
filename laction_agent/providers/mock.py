@@ -62,7 +62,7 @@ class MockProvider(BaseProvider):
         if tool_results:
             user_text = truncate(self._last_user(messages), 200)
             results = "\n\n".join(
-                f"• {truncate((t.content or '').strip(), 1400)}" for t in tool_results
+                f"• {truncate((t.content or '').strip(), 4000)}" for t in tool_results
             )
             return ProviderResponse(
                 content=(
@@ -111,6 +111,27 @@ class MockProvider(BaseProvider):
                 # perintah shell "list file -la" yang tidak ada.
                 return ProviderResponse(tool_calls=[ToolCall("run_terminal", {"command": "ls " + rest}, self._next_id())])
             return ProviderResponse(tool_calls=[ToolCall("list_files", {"path": rest or "."}, self._next_id())])
+
+        # --- Search / local retrieval / APK analysis ---
+        m = re.search(r"(?:cari web|cari di web|web search|search web)\s*[: ]\s*(.+)", user_text, re.IGNORECASE | re.DOTALL)
+        if m:
+            return ProviderResponse(tool_calls=[ToolCall("web_search", {"query": m.group(1).strip()}, self._next_id())])
+
+        m = re.search(r"(?:rag search|cari dokumen|tanya dokumen)\s*[: ]\s*(.+)", user_text, re.IGNORECASE | re.DOTALL)
+        if m:
+            return ProviderResponse(tool_calls=[ToolCall("rag_search", {"query": m.group(1).strip()}, self._next_id())])
+
+        m = re.search(r"(?:analisis|audit|scan)\s+apk\s+(\S+)", user_text, re.IGNORECASE)
+        if m:
+            return ProviderResponse(tool_calls=[ToolCall("apk_analyze", {"path": m.group(1)}, self._next_id())])
+
+        m = re.search(r"ekstrak apk\s+(\S+)\s+member\s+(\S+)\s+ke\s+(\S+)", user_text, re.IGNORECASE)
+        if m:
+            return ProviderResponse(tool_calls=[ToolCall("apk_extract", {"path": m.group(1), "member": m.group(2), "output_path": m.group(3)}, self._next_id())])
+
+        m = re.search(r"(?:run python|python runner|python:)\s*(.+)", user_text, re.IGNORECASE | re.DOTALL)
+        if m:
+            return ProviderResponse(tool_calls=[ToolCall("run_python", {"code": m.group(1).strip()}, self._next_id())])
 
         # --- Terminal & web ---
         m = re.search(r"(?:jalankan|eksekusi|run)\s+(.+)", user_text, re.IGNORECASE | re.DOTALL)
@@ -175,7 +196,8 @@ class MockProvider(BaseProvider):
             "Perintah yang saya pahami: 'list file', 'baca file README.md', "
             "'tulis file x.txt isi halo', 'jalankan echo halo', 'ingat: saya suka kopi', "
             "'apa yang kamu ingat?', 'cari ingatan kopi', 'list skill', "
-            "'buat skill nama: langkah...', 'list tool', 'jam berapa', "
+            "'buat skill nama: langkah...', 'cari web: ...', 'RAG search: ...', "
+            "'analisis APK app.apk', 'Python: ...' (perlu approval), 'list tool', 'jam berapa', "
             "'delegasikan: list file', 'list cron'."
         )
         if any(w in text for w in ("halo", "hai", "hello", "help", "bantuan", "tolong")):

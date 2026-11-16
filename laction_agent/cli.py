@@ -499,7 +499,7 @@ def cmd_doctor(cfg: Config) -> int:
             ok_memory = "doctor check" in mgr.read_memory() and bool(db.search("doctor check"))
             skills = SkillManager(home).list_skills()
         checks.append(("Memory + SQLite", ok_memory, "MEMORY.md & sessions.db writable"))
-        checks.append(("Skill bawaan", len(skills) >= 4, f"{len(skills)} skill"))
+        checks.append(("Skill bawaan", len(skills) >= 13, f"{len(skills)} skill"))
     except Exception as e:  # noqa: BLE001
         checks.append(("Memory + SQLite", False, str(e)))
         checks.append(("Skill bawaan", False, "gagal dibaca"))
@@ -523,6 +523,12 @@ def cmd_doctor(cfg: Config) -> int:
         and not _is_blocked_url("https://8.8.8.8/", allow_private=False),
         "privat/link-local diblokir",
     ))
+    python_guard = get_registry().call(
+        "run_python", {"code": "print('doctor')"}, context={"approval_mode": "smart"}
+    )
+    checks.append(("Python approval", "PERLU APPROVAL" in python_guard, "arbitrary code fail-closed tanpa callback"))
+    rag_guard = get_registry().call("rag_search", {"query": "doctor", "path": "../"})
+    checks.append(("RAG path guard", "DITOLAK" in rag_guard, "retrieval dibatasi ke workspace"))
 
     if cfg.provider == "mock":
         checks.append(("API key", True, "tidak dibutuhkan (mock)"))

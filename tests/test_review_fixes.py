@@ -69,6 +69,7 @@ class TestRedaction(unittest.TestCase):
             "github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz",
             "xoxb-1234567890-abcdefghijk",
             "AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
+            "AKIA1234567890ABCDEF",
         )
         for s in samples:
             with self.subTest(sample=s[:30]):
@@ -204,7 +205,8 @@ class TestContextAndPrompt(unittest.TestCase):
                 "# MEMORY\n" + "lama" * 4000 + "\n- CATATAN_TERBARU_PENTING\n", encoding="utf-8"
             )
             prompt = build_system_prompt(mgr, SkillManager(home))
-        self.assertLess(len(prompt), 8000)
+        # 6,000 karakter adalah batas memory; katalog 13 skill juga masuk prompt.
+        self.assertLess(len(prompt), 10_000)
         self.assertIn("karakter lama dipotong", prompt)
         self.assertIn("CATATAN_TERBARU_PENTING", prompt)
 
@@ -233,7 +235,7 @@ class TestSmallFixes(unittest.TestCase):
                 rc = cmd_doctor(cfg)
             out = buf.getvalue()
         self.assertEqual(rc, 0, out)
-        for label in ("Redaksi secret", "Terminal guard", "SSRF guard"):
+        for label in ("Redaksi secret", "Terminal guard", "SSRF guard", "Python approval", "RAG path guard"):
             self.assertIn(label, out)
 
 
