@@ -69,9 +69,18 @@ class AIAgent:
         child.cron = self.cron
         return child.run(task)
 
+    def _persist(self, role: str, text: str) -> None:
+        """Simpan riwayat ke SQLite dengan kredensial disamarkan.
+
+        Hasil tool (mis. `env`, `cat .env`, respons API) bisa memuat secret;
+        versi lama menyimpannya plaintext sehingga `memory_search` dan
+        `GET /history` bisa membocorkannya.
+        """
+        self.db.save(self.session_id, role, redact(text))
+
     def run(self, user_input: str) -> str:
         self.history.append(Message(role="user", content=user_input))
-        self.db.save(self.session_id, "user", user_input)
+        self._persist("user", user_input)
 
         tools = self.registry.schemas()
         final = ""
@@ -101,10 +110,10 @@ class AIAgent:
                 self.history.append(
                     Message(role="tool", content=result, tool_call_id=tc.id or tc.name)
                 )
-                self.db.save(self.session_id, "tool", f"{tc.name}: {result}")
+                self._persist("tool", f"{tc.name}: {result}")
         else:
             final = "(mencapai batas iterasi tool; naikkan LACTION_MAX_ITERATIONS bila perlu)"
 
         self.history.append(Message(role="assistant", content=final))
-        self.db.save(self.session_id, "assistant", final)
+        self._persist("assistant", final)
         return final

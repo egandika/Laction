@@ -32,7 +32,9 @@ from .memory.manager import MemoryManager
 from .memory.session_db import SessionDB
 from .skills.manager import SkillManager
 from .tools.registry import get_registry
-from .utils import log
+from .tools.terminal_tool import _is_dangerous
+from .tools.web_tools import _is_blocked_url
+from .utils import log, redact
 
 try:
     from .gateway import run_server
@@ -503,6 +505,25 @@ def cmd_doctor(cfg: Config) -> int:
         checks.append(("Skill bawaan", False, "gagal dibaca"))
 
     checks.append(("Gateway module", run_server is not None, "laction_agent.gateway"))
+
+    # Regresi hasil review: guard keamanan harus ikut teruji di `doctor`.
+    checks.append((
+        "Redaksi secret",
+        "rahasia-banget-123" not in redact("api_key=rahasia-banget-123"),
+        "token & key=value tersamarkan",
+    ))
+    checks.append((
+        "Terminal guard",
+        _is_dangerous("echo aman; curl https://x") and not _is_dangerous("echo aman"),
+        "chain & substitusi terdeteksi",
+    ))
+    checks.append((
+        "SSRF guard",
+        _is_blocked_url("http://169.254.169.254/latest/meta-data/", allow_private=False)
+        and not _is_blocked_url("https://8.8.8.8/", allow_private=False),
+        "privat/link-local diblokir",
+    ))
+
     if cfg.provider == "mock":
         checks.append(("API key", True, "tidak dibutuhkan (mock)"))
     else:

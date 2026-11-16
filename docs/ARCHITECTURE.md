@@ -217,6 +217,16 @@ Gateway menyimpan satu `AIAgent` per `session_id` di memori dan memserialisasi `
 
 ---
 
-## 11. Ringkasan satu kalimat
+## 11. Catatan pasca-review
+
+Review kode (lihat [`REVIEW.md`](REVIEW.md)) tidak mengubah arsitektur di atas, tapi memperbaiki detail di tiga tempat:
+
+- `prompt_builder.py` kini membatasi memori yang disuntik ke system prompt (§4/§7), karena `compress()` memang sengaja tidak memangkas pesan system.
+- `context_compressor.py` tidak lagi melewati kompresi hanya karena jumlah pesan ≤ 6 (§7).
+- `tools/terminal_tool.py` dan `tools/web_tools.py` mendapat guard tambahan; `utils.redact()` dipakai di `agent._persist()` sebelum riwayat masuk SQLite (§6/§8).
+
+---
+
+## 12. Ringkasan satu kalimat
 
 **Laction Agent = loop Hermes yang dipangkas menjadi ~20 file stdlib, dengan mock provider supaya arsitekturnya bisa dipegang, dijalankan, dan diuji sebelum API key pertama dimasukkan.**

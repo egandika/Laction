@@ -1,7 +1,7 @@
 """Tools memory: MEMORY.md / USER.md (Tier 1) + pencarian sesi (Tier 2)."""
 from __future__ import annotations
 
-from ..utils import truncate
+from ..utils import redact, truncate
 from .registry import get_registry
 
 reg = get_registry()
@@ -16,8 +16,10 @@ def memory_save(note: str, context: dict) -> str:
     mgr = (context or {}).get("memory")
     if mgr is None:
         return "Memory manager tidak tersedia."
-    mgr.append_memory(note)
-    return f"Tersimpan ke MEMORY.md: {note}"
+    clean = redact(note)  # MEMORY.md selalu masuk system prompt → jangan bawa secret
+    mgr.append_memory(clean)
+    suffix = " [kredensial disamarkan]" if clean != note else ""
+    return f"Tersimpan ke MEMORY.md: {clean}{suffix}"
 
 
 @reg.register(
@@ -41,8 +43,10 @@ def user_save(note: str, context: dict) -> str:
     mgr = (context or {}).get("memory")
     if mgr is None:
         return "Memory manager tidak tersedia."
-    mgr.append_user(note)
-    return f"Tersimpan ke USER.md: {note}"
+    clean = redact(note)
+    mgr.append_user(clean)
+    suffix = " [kredensial disamarkan]" if clean != note else ""
+    return f"Tersimpan ke USER.md: {clean}{suffix}"
 
 
 @reg.register(
