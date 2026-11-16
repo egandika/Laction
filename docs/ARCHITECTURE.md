@@ -126,6 +126,7 @@ Isolasi profil memakai `LACTION_HOME` (analog `HERMES_HOME`): dua terminal denga
 
 Detail implementasi memory v2:
 
+- Koneksi SQLite memakai `WAL` + `busy_timeout` 10 detik (cron dan gateway bisa menulis bersamaan). Database korup dikarantina ke `sessions.db.corrupt-<stamp>` (beserta sidecar `-wal`/`-shm`) lalu skema dibuat ulang; `SessionDB.recovered_from` mencatatnya.
 - `SessionDB.search()` membangun kueri FTS5 dari token `\w+` (prefix `"kata"*`, `bm25()` ascending). Kueri kosong mengembalikan baris terbaru; kueri simbol seperti `***` atau hasil FTS5 kosong jatuh ke `LIKE`.
 - Tabel `messages_fts` di-backfill saat inisialisasi dan diisi paralel saat `save()`. Build SQLite tanpa FTS5 tetap jalan (`enable_fts=False` otomatis).
 - `MemoryManager` memusatkan `redact()` pada `append_memory()`/`append_user()`, jadi CLI (`laction memory add`) dan gateway (`POST /memory`) tidak bisa melewati sanitasi. Append memangkas file ke `max_file_chars=32_000`; `read_all()` tidak memotong agar `prompt_builder` tetap bisa menampilkan penanda "karakter lama dipotong".
@@ -209,7 +210,7 @@ Estimasi token = `len(content)/4` + argumen tool call. Angka kasar, tapi cukup u
 | `gateway.py` | `ThreadingHTTPServer`, UI HTML/JS tanpa build, semua fetch relatif (aman di balik proxy preview), CORS terbuka, token opsional; endpoint `/traces`, `/mcp`, `POST /memory` prune |
 | `cron/scheduler.py` | `cron.json` + daemon thread; tiap job memanggil `AIAgent(cfg)` dengan sesi baru agar riwayat cron tidak bercampur chat |
 
-Gateway menyimpan satu `AIAgent` per `session_id` di memori dan memserialisasi `agent.run()` dengan `run_lock` (satu agent tidak dipakai dua request bersamaan).
+Gateway menyimpan satu `AIAgent` per `session_id` di memori (cache LRU maks 32 sesi) dan memserialisasi `agent.run()` dengan `run_lock` bertimeout 120 detik; permintaan yang tidak mendapat lock dijawab `429` dengan `retry_after_seconds`, bukan menggantung. `/health` melaporkan `sessions_cached`, `sandbox_mode`, dan `uptime_seconds`.
 
 ### Observability (`tool_events`)
 
