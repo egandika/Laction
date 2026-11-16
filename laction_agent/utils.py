@@ -28,6 +28,7 @@ _TOKEN_PATTERN = re.compile(
     r"|gh[pousr]_[A-Za-z0-9]{8,}"
     r"|github_pat_[A-Za-z0-9_]{10,}"
     r"|xox[baprs]-[A-Za-z0-9\-]{8,}"
+    r"|AKIA[0-9A-Z]{16}"
     r"|AIza[0-9A-Za-z_\-]{20,}"
     r")"
 )

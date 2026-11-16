@@ -31,17 +31,19 @@ flowchart TB
     A --> P{Provider}
     P -->|mock| M[MockProvider<br/>rule-based, tanpa API key]
     P -->|openai-compatible| O[OpenAICompatProvider<br/>urllib + function calling]
+    O -.-> G[Gemini compatibility endpoint]
 
     A --> R[ToolRegistry<br/>self-register @register]
-    R --> T1[file_tools · terminal_tool · web_tools]
-    R --> T2[memory_tool · skills_tool]
-    R --> T3[delegate_tool · cron_tool · system_tool]
+    R --> T1[file_tools · terminal_tool · python_tool]
+    R --> T2[web_search · web_fetch · rag_search]
+    R --> T3[apk_tools · memory_tool · skills_tool]
+    R --> T4[delegate_tool · cron_tool · system_tool]
 
-    T2 --> MEM[(data/<br/>MEMORY.md · USER.md)]
-    T2 --> SK[(data/skills/*/SKILL.md)]
+    T3 --> MEM[(data/<br/>MEMORY.md · USER.md)]
+    T3 --> SK[(data/skills/*/SKILL.md)]
     A --> DB[(data/sessions.db<br/>SQLite)]
-    T3 --> SUB[Sub-agent<br/>sesi terisolasi, depth ≤ 2]
-    T3 --> CRON[(data/cron.json)]
+    T4 --> SUB[Sub-agent<br/>sesi terisolasi, depth ≤ 2]
+    T4 --> CRON[(data/cron.json)]
 
     MEM -.-> PB
     SK -.-> PB
@@ -99,7 +101,7 @@ sequenceDiagram
 | `MockProvider` | Rule-based Bahasa Indonesia → tool call; setelah tool result → ringkasan final. Deterministik, cocok untuk CI. |
 | `OpenAICompatProvider` | POST `{api_base}/chat/completions` dengan `tools=[{type:function,...}]`, parse `message.tool_calls`, kembalikan ke loop. |
 
-Konsekuensi: menambah Anthropic/Gemini tinggal menulis adapter baru yang menerjemahkan `Message`/`ToolCall`; `agent.py`, `tools/`, dan `memory/` tidak berubah.
+Konsekuensi: Gemini sudah memakai compatibility endpoint melalui `OpenAICompatProvider`; provider lain tinggal menulis adapter yang menerjemahkan `Message`/`ToolCall`. `agent.py`, `tools/`, dan `memory/` tidak perlu berubah.
 
 `Config.validate()` menjaga provider tetap dalam daftar yang dikenal, dan `create_provider()` menolak `custom` tanpa `LACTION_API_BASE`.
 
@@ -112,6 +114,7 @@ Konsekuensi: menambah Anthropic/Gemini tinggal menulis adapter baru yang menerje
 | Tier 1 | `MEMORY.md` + `USER.md` | ✅ sama | Selalu masuk system prompt (nol latensi retrieval) |
 | Tier 2 | SQLite FTS5 | ✅ `sessions.db` + `LIKE` | Lewat `memory_search` / `GET /history` |
 | Tier 3 | Honcho / user modeling | ⏳ belum | Roadmap |
+| Workspace RAG | Retrieval over user files | ✅ `rag_search` (BM25 leksikal) | Path/baris lokal; bukan vector embedding |
 
 Keputusan: Tier 1 sengaja berupa Markdown yang bisa dibaca manusia. User bisa membuka `data/MEMORY.md`, menghapus baris yang salah, atau commit-kan ke repo lain. Tidak ada database opaque untuk ingatan jangka panjang.
 
@@ -129,7 +132,7 @@ laction_agent/skills/bundled/*   → bawaan, ikut pip package
 $LACTION_HOME/skills/*           → ditulis agent sendiri (menimpa nama sama)
 ```
 
-`SkillManager.list_skills()` membaca frontmatter `description:` dan menyuntikkan daftar skill ke system prompt. Agent lalu bisa `view_skill` sebelum memakai, dan `create_skill` setelah menemukan prosedur yang berulang.
+`SkillManager.list_skills()` membaca frontmatter `description:` dan menyuntikkan katalog terbatas ke system prompt; body dimuat lewat `view_skill` saat dibutuhkan (progressive disclosure sesuai Agent Skills). Ada 13 skill bawaan; rincian dan keputusan scope ada di [`SKILLS.md`](SKILLS.md). Agent bisa `create_skill` setelah menemukan prosedur yang berulang.
 
 Ini versi sederhana dari *closed learning loop* Hermes:
 
@@ -158,9 +161,13 @@ def nama_tool(arg: str, context: dict) -> str:
 ### Guard
 
 - `_safe(path)` di `file_tools.py`: `resolve()` harus tetap di bawah `Path.cwd()`.
-- `run_terminal`: daftar pola berbahaya + timeout 30 detik + callback approval.
+- `run_terminal`: daftar pola berbahaya + timeout 30 detik + callback approval; tetap bukan sandbox.
+- `run_python`: tidak memakai shell, tetapi selalu butuh approval dan tetap arbitrary code dengan hak OS user.
+- `apk_analyze`/`apk_extract`: batas ukuran, manifest/AXML statis, ekstraksi satu entry; tidak menjalankan APK.
+- `rag_search`: workspace-only, mengecualikan data/build/hidden dirs, mengembalikan kutipan file/baris.
+- `web_search`: endpoint DuckDuckGo tetap dan best-effort; query keluar ke pihak ketiga.
 - `truncate()` membatasi hasil tool (8000 karakter) sebelum masuk context.
-- `redact()` menyamarkan `sk-...` / `ghp_...` pada log.
+- `redact()` menyamarkan token umum sebelum hasil disimpan ke SQLite/memory.
 
 ---
 
@@ -195,7 +202,7 @@ Gateway menyimpan satu `AIAgent` per `session_id` di memori dan memserialisasi `
 
 | Hermes | Laction v0.1 | Alasan |
 |---|---|---|
-| ~50 tools + MCP ~1000 baris | 20 tools, registry ~70 baris | Inti mudah diaudit |
+| ~50 tools + MCP ~1000 baris | 25 tools, registry tetap tipis | Inti mudah diaudit; penambahan dipisah per modul |
 | Docker / SSH / Singularity / Modal / Daytona | `subprocess` lokal + approval | Cukup untuk repo kecil |
 | 20+ platform messaging | CLI + HTTP | Gateway bisa jadi fondasi adapter |
 | FTS5 + Honcho | SQLite `LIKE` + Markdown | Zero dependency |
@@ -209,8 +216,11 @@ Gateway menyimpan satu `AIAgent` per `session_id` di memori dan memserialisasi `
 | Mau menambah… | Edit di sini |
 |---|---|
 | Provider baru | `laction_agent/providers/` + `create_provider()` |
-| Tool baru | `laction_agent/tools/<nama>_tool.py` (import otomatis di `registry.py`) |
+| Tool baru | `laction_agent/tools/<nama>_tool.py` (import di `registry.py`) |
 | Skill baru | `laction_agent/skills/bundled/<nama>/SKILL.md` atau `create_skill` |
+| RAG workspace | `tools/rag_tool.py` — BM25 leksikal, bukan embeddings |
+| APK triage | `tools/apk_tools.py` — ZIP/AXML parsing bounded, statis saja |
+| Public web search | `tools/search_tool.py` — DDG HTML best-effort, query eksternal |
 | Surface baru | `cli.py` subcommand / `gateway.py` endpoint |
 | Backend eksekusi | Ganti `run_terminal` dengan implementasi Docker/SSH yang sama kontraknya |
 | Memory remote | Tambah adapter di `memory/` lalu suntikkan ke `prompt_builder.py` |
@@ -227,6 +237,21 @@ Review kode (lihat [`REVIEW.md`](REVIEW.md)) tidak mengubah arsitektur di atas, 
 
 ---
 
-## 12. Ringkasan satu kalimat
+## 12. Fitur tambahan pasca-riset
 
-**Laction Agent = loop Hermes yang dipangkas menjadi ~20 file stdlib, dengan mock provider supaya arsitekturnya bisa dipegang, dijalankan, dan diuji sebelum API key pertama dimasukkan.**
+Perluasan tetap mematuhi no-core-dependency dan memisahkan prosedur dari aksi:
+
+- `run_python` selalu menunggu approval; ia tidak menyediakan sandbox.
+- `web_search` best-effort ke HTML DuckDuckGo dan mengirim query keluar; bukan Google/Brave API.
+- `rag_search` memberi retrieval BM25 lokal dengan sitasi path/baris; belum ada embedding/vector memory.
+- `apk_analyze` membaca APK ZIP + text/binary AXML dan scan terbatas; `apk_extract` hanya satu entry. Keduanya statis, tidak menjalankan APK.
+- Gemini masuk lewat OpenAI-compatible adapter. MCP, messaging, media, vector DB, dan Android dynamic analysis tetap roadmap.
+- Skill bawaan kini 13; metadata dibatasi di katalog system prompt, body dimuat lewat `view_skill`.
+
+Rincian bukti dan alasan pemilihan ada di [`SKILLS.md`](SKILLS.md).
+
+---
+
+## 13. Ringkasan satu kalimat
+
+**Laction Agent = loop ReAct stdlib-only dengan 25 tools, 13 skill bawaan, memory lokal, dan mock provider; fitur eksternal/dinamis dibatasi eksplisit agar tidak mengklaim kemampuan yang belum dibuat.**

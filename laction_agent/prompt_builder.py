@@ -5,21 +5,36 @@ from .memory.manager import MemoryManager
 from .skills.manager import SkillManager
 from .utils import tail
 
-# System prompt tidak pernah dipangkas oleh ContextCompressor, jadi harus
-# dibatasi di sini. MEMORY.md bersifat append-only → simpan bagian TERBARU.
+# System prompt tidak pernah dipangkas oleh ContextCompressor, jadi batasnya ada di sini.
 MEMORY_LIMIT = 6000
 MAX_SKILLS_IN_PROMPT = 40
+SKILL_CATALOG_LIMIT = 2200
+
+
+def _skill_catalog(skill_list: list[dict]) -> str:
+    lines: list[str] = []
+    omitted = len(skill_list) > MAX_SKILLS_IN_PROMPT
+    for skill in skill_list[:MAX_SKILLS_IN_PROMPT]:
+        line = f"- {skill['name']}: {skill['description']}"
+        candidate = "\n".join([*lines, line])
+        if len(candidate) > SKILL_CATALOG_LIMIT:
+            omitted = True
+            break
+        lines.append(line)
+
+    if not lines:
+        return "(belum ada skill)"
+    if omitted:
+        note = "- ... skill lain tidak ditampilkan (pakai list_skills untuk katalog lengkap)"
+        while lines and len("\n".join([*lines, note])) > SKILL_CATALOG_LIMIT:
+            lines.pop()
+        if len(note) <= SKILL_CATALOG_LIMIT:
+            lines.append(note)
+    return "\n".join(lines)
 
 
 def build_system_prompt(memory: MemoryManager, skills: SkillManager) -> str:
-    skill_list = skills.list_skills()
-    shown = skill_list[:MAX_SKILLS_IN_PROMPT]
-    skills_text = "\n".join(f"- {s['name']}: {s['description']}" for s in shown) or "(belum ada skill)"
-    if len(skill_list) > MAX_SKILLS_IN_PROMPT:
-        skills_text += (
-            f"\n- ... {len(skill_list) - MAX_SKILLS_IN_PROMPT} skill lain "
-            "(pakai list_skills untuk daftar lengkap)"
-        )
+    skills_text = _skill_catalog(skills.list_skills())
     memory_text = tail(memory.read_all(), MEMORY_LIMIT)
 
     return f"""Kamu adalah Laction Agent — AI agent lokal yang membantu user di repo Laction.
@@ -36,6 +51,9 @@ Setelah menyelesaikan tugas kompleks yang berulang, pertimbangkan membuat skill 
 
 Aturan:
 - Simpan fakta penting dengan memory_save, preferensi user dengan user_save.
+- Untuk tugas multi-langkah, pecah menjadi langkah kerja singkat; gunakan tool untuk fakta/aksi yang dapat diverifikasi.
+- Setelah perubahan atau analisis penting, cek hasilnya dengan test, diff, atau sumber yang relevan.
+- Jangan tampilkan chain-of-thought internal; berikan rencana ringkas, kesimpulan, dan bukti yang bisa diperiksa.
 - Jangan jalankan perintah berbahaya tanpa approval.
 - Jawab dalam Bahasa Indonesia kecuali user meminta bahasa lain.
 """
