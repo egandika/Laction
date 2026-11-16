@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "laction-agent"
+version = "0.1.0"
+description = "Laction Agent — AI Agent lokal yang tumbuh bareng kamu (Hermes-inspired)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Laction"}]
+keywords = ["ai-agent", "autonomous", "hermes-inspired", "local-first"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
+
+# Core: ZERO dependency eksternal — hanya stdlib Python 3.11+
+# Supaya bisa jalan di VPS $5, laptop, atau container tanpa ribet.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+yaml = ["pyyaml>=6.0"]
+http = ["requests>=2.31"]
+
+[project.scripts]
+laction = "laction_agent.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["laction_agent*"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"laction_agent.skills" = ["bundled/*/SKILL.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

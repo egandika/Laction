@@ -1,0 +1,27 @@
+# Runtime data (memory, sessions, logs) — jangan commit
+data/
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+config.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/

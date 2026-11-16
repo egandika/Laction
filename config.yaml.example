@@ -1,0 +1,20 @@
+# Laction Agent — contoh config
+# Copy ke config.yaml untuk override. Semua field opsional.
+# Urutan prioritas: env proses > .env > config.yaml > default.
+
+provider: mock
+model: mock-laction-1
+api_base: ""
+api_key: ""
+
+home: ./data
+max_iterations: 10
+context_limit: 8000
+
+# Keamanan terminal: smart = minta approval hanya untuk perintah berbahaya
+#                    always = semua perintah shell minta approval
+#                    never  = blokir perintah berbahaya, sisanya langsung jalan
+approval_mode: smart
+
+# Cron scheduler (dipakai oleh `laction gateway` / `laction cron start`)
+cron_enabled: true
