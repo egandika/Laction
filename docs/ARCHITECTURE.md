@@ -174,8 +174,10 @@ def nama_tool(arg: str, context: dict) -> str:
 - `_safe(path, context=None)` di `file_tools.py`: `resolve()` harus tetap di bawah `get_workspace(context)`; `write_file` menolak `mcp_servers.json`, `cron.json`, dan `SKILL.md`.
 - `run_terminal`: daftar pola berbahaya (termasuk substitusi `$(...)`/backtick) + timeout 30 detik + callback approval; lokal atau container sesuai `sandbox_mode`.
 - `run_python`: tidak memakai shell, tetapi selalu butuh approval; lokal atau container sesuai `sandbox_mode`.
+- `ToolRegistry.call()` melengkapi konteks yang hilang (`_with_defaults`) dari `LACTION_WORKSPACE`/`LACTION_SANDBOX_MODE`/`LACTION_APPROVAL_MODE`/`LACTION_HOME` supaya pemanggil non-interaktif tidak jatuh ke `cwd` saat import; `approve` sengaja tidak diisi sehingga tool berisiko tetap fail-closed.
 - `sandbox.py`: `DockerExecutor` merakit `docker run --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m --cap-drop ALL --security-opt no-new-privileges --pids-limit 64 --memory 256m --cpus 1.0 --user 65534:65534` dengan workspace `ro`. `resolve_execution_backend()` fail-closed pada mode `docker` dan turun ke lokal pada `auto`.
-- `tools/mcp_tool.py`: `mcp_call` ada di luar `READ_ONLY_TOOLS`, butuh approval, dan hanya menerima server yang terdaftar di `mcp_servers.json`.
+- `tools/mcp_tool.py`: `mcp_call` ada di luar `READ_ONLY_TOOLS`, butuh approval, hanya menerima server terdaftar di `mcp_servers.json`, dan menolak tool di luar allowlist per-server sebelum approval diminta. Argumen divalidasi terhadap `inputSchema` (`required`, tipe primitif, batas 8.000 karakter/argumen dan 64 KiB total).
+- `mcp/client.py`: watchdog `threading.Timer` membunuh proses server yang melewati batas wall-clock handshake, dan `stderr` ditangkap (tidak diwariskan) untuk diagnosa gagal-start.
 - `apk_analyze`/`apk_extract`: batas ukuran, manifest/AXML statis, ekstraksi satu entry; tidak menjalankan APK.
 - `rag_search`: workspace-only, mengecualikan data/build/hidden dirs, mengembalikan kutipan file/baris.
 - `web_search`: endpoint DuckDuckGo tetap dan best-effort; query keluar ke pihak ketiga.
@@ -240,7 +242,8 @@ Gateway menyimpan satu `AIAgent` per `session_id` di memori dan memserialisasi `
 | Public web search | `tools/search_tool.py` — DDG HTML best-effort, query eksternal |
 | Surface baru | `cli.py` subcommand / `gateway.py` endpoint |
 | Backend eksekusi | `sandbox.py` (`DockerExecutor`); tambah backend baru dengan kontrak `run(argv, workspace, timeout)` yang sama |
-| Server MCP | Daftarkan di `<LACTION_HOME>/mcp_servers.json` atau `laction mcp add` |
+| Server MCP | Daftarkan di `<LACTION_HOME>/mcp_servers.json` atau `laction mcp add`; batasi tool dengan `laction mcp allow` |
+| Nilai konteks tool | `tools/registry.py::_with_defaults` mengisi `workspace`/`sandbox_mode`/`approval_mode`/`home` dari env bila pemanggil tidak mengirimnya (tanpa mengisi `approve`) |
 | Memory remote | Tambah adapter di `memory/` lalu suntikkan ke `prompt_builder.py` |
 
 ---

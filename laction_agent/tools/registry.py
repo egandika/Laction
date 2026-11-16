@@ -53,11 +53,51 @@ class ToolRegistry:
         if tool is None:
             return json.dumps({"error": f"Tool tidak dikenal: {name}", "available": self.names()})
         try:
-            result = tool.handler(context=context or {}, **(arguments or {}))
+            result = tool.handler(context=_with_defaults(context), **(arguments or {}))
             return truncate(str(result), 8000)
         except Exception as e:  # noqa: BLE001 — tool error harus jadi string, bukan crash agent
             log.exception("Tool %s gagal", name)
             return json.dumps({"error": str(e), "tool": name})
+
+
+# Tool yang membaca/menulis path relatif dan karena itu butuh workspace eksplisit.
+_DEFAULT_KEYS = ("workspace", "sandbox_mode", "approval_mode", "home")
+
+
+def _with_defaults(context: dict | None) -> dict:
+    """Lengkapi konteks yang hilang dari env, tanpa melonggarkan guard.
+
+    Panggilan langsung `registry.call(...)` (CLI non-interaktif, gateway, test,
+    cron lama) sebelumnya jatuh ke default modul seperti `Path.cwd()` saat import
+    dan `approval_mode` hardcoded. Di sini nilai env/normatif diisi supaya
+    `LACTION_WORKSPACE`/`LACTION_SANDBOX_MODE`/`LACTION_APPROVAL_MODE` ikut
+    berlaku. `approve` sengaja TIDAK diisi: tanpa callback, tool berisiko tetap
+    fail-closed (`PERLU APPROVAL`).
+    """
+    import os
+    from pathlib import Path
+
+    ctx = dict(context or {})
+    if "cfg" in ctx and ctx["cfg"] is not None:
+        cfg = ctx["cfg"]
+        for key, attr in (
+            ("workspace", "workspace"),
+            ("sandbox_mode", "sandbox_mode"),
+            ("approval_mode", "approval_mode"),
+            ("home", "home"),
+        ):
+            if not ctx.get(key):
+                value = getattr(cfg, attr, None)
+                if value:
+                    ctx[key] = value
+    ctx.setdefault("workspace", os.environ.get("LACTION_WORKSPACE", "").strip())
+    ctx.setdefault("sandbox_mode", os.environ.get("LACTION_SANDBOX_MODE", "none").strip() or "none")
+    ctx.setdefault("approval_mode", os.environ.get("LACTION_APPROVAL_MODE", "smart").strip() or "smart")
+    ctx.setdefault("home", os.environ.get("LACTION_HOME", "./data"))
+    if not ctx.get("workspace"):
+        ctx["workspace"] = str(Path.cwd())
+    return ctx
+
 
 
 _registry: ToolRegistry | None = None

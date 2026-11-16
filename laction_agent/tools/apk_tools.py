@@ -346,7 +346,7 @@ def _report(path: Path, infos: list[zipfile.ZipInfo], manifest: dict | None,
 )
 def apk_analyze(path: str, context: dict | None = None) -> str:
     try:
-        apk = file_tools._safe(path)
+        apk = file_tools._safe(path, context)
     except ValueError as exc:
         return f"DITOLAK: {exc}"
     if not apk.is_file() or apk.suffix.lower() != ".apk":
@@ -414,8 +414,8 @@ def apk_analyze(path: str, context: dict | None = None) -> str:
 )
 def apk_extract(path: str, member: str, output_path: str, context: dict | None = None) -> str:
     try:
-        apk = file_tools._safe(path)
-        target = file_tools._safe(output_path)
+        apk = file_tools._safe(path, context)
+        target = file_tools._safe(output_path, context)
     except ValueError as exc:
         return f"DITOLAK: {exc}"
     if not apk.is_file() or apk.suffix.lower() != ".apk":

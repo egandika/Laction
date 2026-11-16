@@ -20,6 +20,7 @@ import time
 
 MAX_FRAME_BYTES = 1024 * 1024
 DEFAULT_TIMEOUT = 20
+MAX_HANDSHAKE_SECONDS = 25
 PROTOCOL_VERSION = "2024-11-05"
 _ENV_ALLOWLIST = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT")
 
@@ -47,6 +48,8 @@ class MCPStdioClient:
         self._next_id = 0
         self._lines: queue.Queue = queue.Queue()
         self._reader: threading.Thread | None = None
+        self._watchdog: threading.Timer | None = None
+        self._deadline = 0.0
         self.server_info: dict = {}
 
     # ---------- lifecycle ----------
@@ -64,7 +67,7 @@ class MCPStdioClient:
                 [resolved, *self.args],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,  # ditangkap untuk diagnosa, tidak diwariskan ke stdout
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -76,6 +79,12 @@ class MCPStdioClient:
             raise MCPError(f"gagal menjalankan server MCP '{self.command}': {exc}") from exc
         self._reader = threading.Thread(target=self._pump, name="mcp-reader", daemon=True)
         self._reader.start()
+        # Watchdog wall-clock: membunuh seluruh proses grup bila sebuah request
+        # menggantung, jadi thread pemanggil tidak pernah menunggu selamanya.
+        self._deadline = time.monotonic() + MAX_HANDSHAKE_SECONDS
+        self._watchdog = threading.Timer(MAX_HANDSHAKE_SECONDS + 5, self._kill_on_hang)
+        self._watchdog.daemon = True
+        self._watchdog.start()
 
     def _pump(self) -> None:
         proc = self._proc
@@ -88,7 +97,34 @@ class MCPStdioClient:
             self._lines.put(line)
         self._lines.put(None)
 
+    def _kill_on_hang(self) -> None:
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        # Bangunkan pembaca yang menunggu baris terakhir.
+        self._lines.put(MCPError("server MCP dihentikan: melewati batas wall-clock handshake"))
+
+    def stderr_tail(self, limit: int = 800) -> str:
+        """Ambil sisa stderr proses (bila sudah mati) untuk pesan error yang jujur."""
+        proc = self._proc
+        if proc is None or proc.stderr is None:
+            return ""
+        try:
+            if proc.poll() is None:
+                return ""
+            data = proc.stderr.read() or ""
+        except (OSError, ValueError):
+            return ""
+        return data[-limit:].strip()
+
     def close(self) -> None:
+        if self._watchdog is not None:
+            self._watchdog.cancel()
+            self._watchdog = None
         proc = self._proc
         self._proc = None
         if proc is None:
@@ -107,11 +143,12 @@ class MCPStdioClient:
                 proc.wait(timeout=2)
             except (OSError, subprocess.TimeoutExpired):
                 pass
-        if proc.stdout:
-            try:
-                proc.stdout.close()
-            except OSError:
-                pass
+        for stream in (proc.stdout, proc.stderr):
+            if stream:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
 
     # ---------- transport ----------
     def _send(self, payload: dict) -> None:
@@ -159,8 +196,7 @@ class MCPStdioClient:
             message = self._read_message(deadline)
             # Lewati notifikasi/log server yang tidak punya id.
             if message.get("id") != request_id:
-                if "method" in message and "id" not in message:
-                    continue
+                # Notifikasi/log server atau respons usang: lewati, jangan salah kaitkan.
                 continue
             if "error" in message and message["error"]:
                 err = message["error"]
@@ -211,6 +247,8 @@ class MCPStdioClient:
         return clean
 
     def call_tool(self, name: str, arguments: dict | None = None, timeout: float | None = None) -> str:
+        if not name or not isinstance(name, str):
+            raise MCPError("nama tool MCP tidak valid")
         previous = self.timeout
         if timeout is not None:
             self.timeout = max(1.0, float(timeout))

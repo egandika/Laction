@@ -310,6 +310,62 @@ class MCPTests(unittest.TestCase):
         )
         self.assertIn("PERLU APPROVAL", need)
 
+    def test_per_tool_allowlist_blocks_unqueued_tool(self):
+        self.registry.add_server(
+            "demo", sys.executable, ["-m", "laction_agent.mcp.demo_server"], tools=["ping"]
+        )
+        reg = get_registry()
+        prompts: list[str] = []
+        ctx = {
+            "approval_mode": "smart",
+            "cfg": Config(home=str(self.home)),
+            "approve": lambda prompt: prompts.append(prompt) or True,
+        }
+        allowed = reg.call("mcp_call", {"server": "demo", "tool": "ping"}, ctx)
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("allowlist: ping", prompts[0])
+        self.assertIn("pong", allowed)
+        blocked = reg.call("mcp_call", {"server": "demo", "tool": "workspace_summary"}, ctx)
+        self.assertIn("DITOLAK", blocked)
+        # Tool di luar allowlist tidak boleh sempat memicu prompt approval.
+        self.assertEqual(len(prompts), 1)
+
+    def test_empty_allowlist_allows_all_tools_but_still_needs_approval(self):
+        self.registry.add_server("demo", sys.executable, ["-m", "laction_agent.mcp.demo_server"])
+        reg = get_registry()
+        ctx = {"approval_mode": "smart", "cfg": Config(home=str(self.home)), "approve": lambda _p: True}
+        self.assertIn("pong", reg.call("mcp_call", {"server": "demo", "tool": "ping"}, ctx))
+        self.assertIn(
+            "workspace", reg.call("mcp_call", {"server": "demo", "tool": "workspace_summary"}, ctx)
+        )
+
+    def test_tool_name_validation(self):
+        with self.assertRaises(ValueError):
+            self.registry.add_server("demo", sys.executable, ["-m", "x"], tools=["nama salah!"])
+        with self.assertRaises(ValueError):
+            self.registry.add_server("demo", sys.executable, ["-m", "x"], tools=["ok"] * 65)
+
+    def test_arguments_validated_against_schema(self):
+        self.registry.add_server("demo", sys.executable, ["-m", "laction_agent.mcp.demo_server"])
+        reg = get_registry()
+        ctx = {
+            "approval_mode": "smart",
+            "cfg": Config(home=str(self.home)),
+            "approve": lambda _p: True,
+        }
+        wrong_type = reg.call(
+            "mcp_call", {"server": "demo", "tool": "ping", "arguments": {"message": 12}}, ctx
+        )
+        self.assertIn("bertipe string", wrong_type)
+        too_big = reg.call(
+            "mcp_call",
+            {"server": "demo", "tool": "ping", "arguments": {"message": "x" * 9000}},
+            ctx,
+        )
+        self.assertIn("melebihi 8000 karakter", too_big)
+        ok = reg.call("mcp_call", {"server": "demo", "tool": "ping", "arguments": {"message": "hai"}}, ctx)
+        self.assertEqual(ok, "pong: hai")
+
     def test_mcp_call_rejects_unlisted_server(self):
         reg = get_registry()
         result = reg.call(
@@ -375,6 +431,40 @@ class CliAndSurfaceTests(unittest.TestCase):
             server = MCPRegistry(Path(tmp)).get("demo")
             self.assertEqual(server["args"], ["-m", "mod"])
             self.assertEqual(server["description"], "server demo")
+
+    def test_mcp_add_extracts_options_after_args(self):
+        from laction_agent import cli as cli_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = parse_args([
+                "mcp", "add", "--name", "demo", "--command", "python3",
+                "--args", "-m", "mod", "--allow-tools", "ping", "pong",
+                "--description", "server demo",
+            ])
+            cfg = Config(home=tmp)
+            with mock.patch("builtins.print"):
+                code = cli_mod.cmd_mcp(cfg, args)
+            self.assertEqual(code, 0)
+            server = MCPRegistry(Path(tmp)).get("demo")
+            self.assertEqual(server["args"], ["-m", "mod"])
+            self.assertEqual(server["tools"], ["ping", "pong"])
+            self.assertEqual(server["description"], "server demo")
+
+    def test_mcp_allow_subcommand(self):
+        from laction_agent import cli as cli_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            MCPRegistry(Path(tmp)).add_server("demo", "python3", ["-m", "x"])
+            args = parse_args(["mcp", "allow", "--name", "demo", "--tools", "ping"])
+            cfg = Config(home=tmp)
+            with mock.patch("builtins.print"):
+                self.assertEqual(cli_mod.cmd_mcp(cfg, args), 0)
+            self.assertEqual(MCPRegistry(Path(tmp)).get("demo")["tools"], ["ping"])
+
+            missing = parse_args(["mcp", "allow", "--name", "tidak-ada", "--tools", "ping"])
+            with mock.patch("builtins.print"):
+                with mock.patch("sys.stderr"):
+                    self.assertEqual(cli_mod.cmd_mcp(cfg, missing), 1)
 
     def test_build_parser_help_works(self):
         parser = build_parser()
@@ -489,6 +579,33 @@ class GatewayEndpointTests(unittest.TestCase):
         status, data = self._get(port, "/mcp")
         self.assertEqual(status, 200)
         self.assertEqual(data["servers"][0]["name"], "demo")
+
+    def test_mcp_probe_endpoint(self):
+        import sys as _sys
+
+        MCPRegistry(Path(self.home)).add_server(
+            "demo", _sys.executable, ["-m", "laction_agent.mcp.demo_server"], tools=["ping"]
+        )
+        port = self._start()
+        status, data = self._post(port, "/mcp", {"name": "demo"})
+        self.assertEqual(status, 200)
+        self.assertIn("ping", data["tools"])
+        self.assertEqual(data["blocked"], ["workspace_summary"])
+
+        with self.assertRaises(urllib.error.HTTPError) as ctx404:
+            self._post(port, "/mcp", {"name": "tidak-ada"})
+        self.assertEqual(ctx404.exception.code, 404)
+
+    def test_list_tools_respects_allowlist_marker(self):
+        import sys as _sys
+
+        MCPRegistry(Path(self.home)).add_server(
+            "demo", _sys.executable, ["-m", "laction_agent.mcp.demo_server"], tools=["ping"]
+        )
+        port = self._start()
+        status, data = self._get(port, "/mcp")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["servers"][0]["tools"], ["ping"])
 
     def test_memory_redaction_and_prune(self):
         port = self._start()
