@@ -6,10 +6,20 @@ Disimpan di `<LACTION_HOME>/mcp_servers.json`:
 ```json
 {
   "servers": [
-    {"name": "demo", "command": "python3", "args": ["-m", "laction_agent.mcp.demo_server"], "enabled": true}
+    {
+      "name": "demo",
+      "command": "python3",
+      "args": ["-m", "laction_agent.mcp.demo_server"],
+      "enabled": true,
+      "tools": ["ping", "workspace_summary"]
+    }
   ]
 }
 ```
+
+`tools` bersifat opsional: bila diisi, hanya tool tersebut yang boleh dipanggil
+(di luar itu ditolak sebelum proses server dijalankan). Kosong/absen = semua
+tool server boleh dipanggil, tetapi `mcp_call` tetap butuh approval.
 
 Desain keamanan: hanya server yang terdaftar manual yang bisa dijalankan —
 tidak ada auto-discovery dari file proyek, dan `write_file` agent diblokir
@@ -22,8 +32,10 @@ import re
 from pathlib import Path
 
 SERVER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,63}$")
 MAX_ARGS = 32
 MAX_ARG_CHARS = 512
+MAX_ALLOWED_TOOLS = 64
 
 
 class MCPRegistry:
@@ -82,12 +94,25 @@ class MCPRegistry:
             if not re.match(r"^[A-Z_][A-Z0-9_]{0,63}$", key_str):
                 raise ValueError(f"nama env variable tidak valid: {key_str}")
             clean_env[key_str] = str(value)[:MAX_ARG_CHARS]
+        raw_tools = raw.get("tools") or []
+        if not isinstance(raw_tools, list):
+            raise ValueError("tools harus list nama tool")
+        if len(raw_tools) > MAX_ALLOWED_TOOLS:
+            raise ValueError(f"tools maksimal {MAX_ALLOWED_TOOLS} entri")
+        clean_tools: list[str] = []
+        for entry in raw_tools:
+            tool_name = str(entry).strip()
+            if not TOOL_NAME_RE.match(tool_name):
+                raise ValueError(f"nama tool tidak valid: {tool_name}")
+            if tool_name not in clean_tools:
+                clean_tools.append(tool_name)
         return {
             "name": name,
             "command": command,
             "args": clean_args,
             "env": clean_env,
             "enabled": bool(raw.get("enabled", True)),
+            "tools": clean_tools,
             "description": str(raw.get("description", ""))[:200],
         }
 
@@ -108,7 +133,15 @@ class MCPRegistry:
                 return server
         return None
 
-    def add_server(self, name: str, command: str, args: list[str] | None = None, env: dict | None = None, description: str = "") -> dict:
+    def add_server(
+        self,
+        name: str,
+        command: str,
+        args: list[str] | None = None,
+        env: dict | None = None,
+        description: str = "",
+        tools: list[str] | None = None,
+    ) -> dict:
         server = self.validate_server(
             {
                 "name": name,
@@ -116,6 +149,7 @@ class MCPRegistry:
                 "args": args or [],
                 "env": env or {},
                 "enabled": True,
+                "tools": tools or [],
                 "description": description,
             }
         )
@@ -138,6 +172,20 @@ class MCPRegistry:
         if len(kept) == len(data["servers"]):
             return False
         self._write({"servers": kept})
+        return True
+
+    def set_tools(self, name: str, tools: list[str]) -> bool:
+        """Batasi tool per server (allowlist per-tool); list kosong = semua tool."""
+        wanted = str(name or "").strip().lower()
+        server = self.get(wanted)
+        if server is None:
+            return False
+        validated = self.validate_server({**server, "tools": list(tools or [])})
+        data = self._read()
+        for raw in data["servers"]:
+            if isinstance(raw, dict) and str(raw.get("name", "")).strip().lower() == wanted:
+                raw["tools"] = validated["tools"]
+        self._write(data)
         return True
 
     def set_enabled(self, name: str, enabled: bool) -> bool:

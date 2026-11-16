@@ -11,11 +11,14 @@ PROTECTED_FILENAMES = frozenset({"mcp_servers.json", "cron.json", "SKILL.md"})
 
 
 def get_workspace(context: dict | None = None) -> Path:
-    """Resolusi workspace aktif: Config.workspace > LACTION_WORKSPACE > WORKSPACE default."""
+    """Resolusi workspace aktif: Config.workspace > context > LACTION_WORKSPACE > WORKSPACE."""
     cfg = (context or {}).get("cfg")
     cfg_ws = getattr(cfg, "workspace", "") if cfg is not None else ""
     if isinstance(cfg_ws, str) and cfg_ws.strip():
         return Path(cfg_ws.strip()).expanduser().resolve()
+    ctx_ws = (context or {}).get("workspace")
+    if isinstance(ctx_ws, str) and ctx_ws.strip():
+        return Path(ctx_ws.strip()).expanduser().resolve()
     env_ws = os.environ.get("LACTION_WORKSPACE", "").strip()
     if env_ws:
         return Path(env_ws).expanduser().resolve()

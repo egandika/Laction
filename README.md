@@ -105,8 +105,9 @@ laction skills code-review                  # lihat isi SKILL.md
 laction memory add "repo ini pakai stdlib"
 laction memory prune --max-entries 50 --max-chars 6000
 laction traces --limit 20                   # durasi & status tiap panggilan tool
-laction mcp add --name demo --command python3 --args -m laction_agent.mcp.demo_server
-laction mcp list | tools --name demo | remove --name demo
+laction mcp add --name demo --command python3 --args -m laction_agent.mcp.demo_server \
+  --allow-tools ping workspace_summary            # allowlist per-tool (opsional tapi disarankan)
+laction mcp list | tools --name demo | allow --name demo --tools ping | remove --name demo
 laction --workspace /path/ke/proyek --sandbox-mode docker chat
 laction init                                # buat profil data
 laction cron list | add | remove | start
@@ -232,7 +233,7 @@ Laction/
 | `device_health` | RAM dan storage read-only |
 | `simulate_files`, `evolve_plan` | Dunia file virtual in-memory dan simulasi evolusi numerik terbatas; tidak menerapkan perubahan |
 | `cron_add`, `cron_list`, `cron_remove` | Jadwal berulang |
-| `mcp_list_servers`, `mcp_list_tools`, `mcp_call` | Klien MCP `stdio` dengan allowlist eksplisit; `mcp_call` selalu perlu approval |
+| `mcp_list_servers`, `mcp_list_tools`, `mcp_call` | Klien MCP `stdio` dengan allowlist server + per-tool, validasi argumen, dan approval wajib |
 | `get_time`, `list_tools`, `agent_info` | Utilitas sistem |
 
 Tool mendaftar sendiri lewat `@reg.register(...)`. Menambah tool = tulis satu fungsi + skema JSON, tidak perlu menyentuh `agent.py`.
@@ -270,7 +271,7 @@ Skill bawaan (16): `repo-onboarding`, `code-review`, `release-notes`, `self-impr
 - **Web search**: `web_search` memakai HTML DuckDuckGo yang tidak resmi, bisa rate-limit/berubah; query dikirim ke pihak ketiga. Pola credential umum ditolak, tetapi jangan kirim secret/data privat.
 - **Python runner**: `run_python` tidak memakai shell, tetapi pada `sandbox_mode=none` tetap arbitrary code dengan hak user; selalu fail-closed tanpa approval interaktif.
 - **Sandbox Docker opsional** (`LACTION_SANDBOX_MODE=none|auto|docker`): `DockerExecutor` menjalankan shell/Python di container `--network none`, root `--read-only`, `/tmp` `noexec,nosuid,size=64m`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--pids-limit 64`, `--memory 256m`, `--cpus 1.0`, user `65534:65534`, hanya workspace yang di-mount (`ro`). Mode `docker` **fail-closed** bila binary/ daemon Docker tidak siap; mode `auto` turun ke eksekusi lokal. Container tetap berbagi kernel host dan workspace `ro` masih bisa dibaca, jadi approval tetap wajib.
-- **MCP allowlist**: hanya server di `<LACTION_HOME>/mcp_servers.json` yang bisa dijalankan (tidak ada auto-discovery). Klien `stdio` memakai JSON-RPC 2.0, frame maks 1 MiB, timeout wall-clock, dan environment yang diwarisi hanya `PATH`/`HOME`/`LANG` + env server eksplisit (`LACTION_API_KEY` tidak bocor ke proses anak). `mcp_call` di luar `READ_ONLY_TOOLS` dan butuh approval.
+- **MCP allowlist berlapis**: hanya server di `<LACTION_HOME>/mcp_servers.json` yang bisa dijalankan (tidak ada auto-discovery); tiap server boleh punya allowlist `tools` sendiri, dan tool di luar daftar ditolak **sebelum** approval/ proses server dijalankan. Argumen divalidasi terhadap `inputSchema` (wajib-isi, tipe primitif, ukuran), approval diminta sebelum proses pihak ketiga di-spawn, dan klien punya watchdog wall-clock yang membunuh proses yang menggantung. Klien `stdio` memakai JSON-RPC 2.0, frame maks 1 MiB, timeout wall-clock, dan environment yang diwarisi hanya `PATH`/`HOME`/`LANG` + env server eksplisit (`LACTION_API_KEY` tidak bocor ke proses anak). `mcp_call` di luar `READ_ONLY_TOOLS` dan butuh approval.
 - **Team deadline**: `consult_team` punya batas wall-clock total (`LACTION_TEAM_TIMEOUT`, default 45 detik, bisa ditimpa `timeout_seconds`); worker yang lewat batas dibatalkan dan hasilnya ditandai `TIMEOUT`.
 - **APK tools**: `apk_analyze` hanya membaca ZIP/AXML/strings dengan batas ukuran, `apk_extract` menulis satu entry ke workspace; tidak menjalankan APK dan bukan pengganti audit penuh.
 - **RAG**: `rag_search` hanya file teks lokal yang diizinkan, mengecualikan `data/`, hidden dirs, `.git`, virtualenv, dan output build; retrieval BM25 leksikal, bukan vector.
@@ -295,7 +296,7 @@ pip install -e ".[dev]"
 python3 -m pytest -q
 ```
 
-**130 test** mencakup config/provider (termasuk Gemini), tool registry, file guard, loop mock, memory, skills, delegasi, context compressor, CLI/gateway, Python approval, BM25 RAG, parser DuckDuckGo, APK text/binary AXML + zip-slip guard, routing mock, serta paket terbaru: FTS5 + `prune` + redaksi terpusat, `tool_events`/metrics, workspace eksplisit, flag `DockerExecutor`, deadline tim, dan roundtrip MCP stdio (`tests/test_next_packages.py`).
+**138 test** mencakup config/provider (termasuk Gemini), tool registry, file guard, loop mock, memory, skills, delegasi, context compressor, CLI/gateway, Python approval, BM25 RAG, parser DuckDuckGo, APK text/binary AXML + zip-slip guard, routing mock, serta paket terbaru: FTS5 + `prune` + redaksi terpusat, `tool_events`/metrics, workspace eksplisit, flag `DockerExecutor`, deadline tim, dan roundtrip MCP stdio (`tests/test_next_packages.py`).
 
 `laction doctor` juga memverifikasi guard keamanan & kemampuan baru: redaksi, terminal chain/substitusi, SSRF, approval Python, path RAG, FTS5, `memory prune`, redaksi memory, `tool_events`, workspace eksplisit, backend sandbox, registry MCP, dan roundtrip server MCP demo.
 
@@ -311,7 +312,7 @@ Rencana lanjutan paling masuk akal (berurutan sesuai prioritas review):
 
 1. **Sandbox produksi**: `gVisor`/`Firecracker` atau seccomp profile kustom di atas `DockerExecutor`; saat ini container berbagi kernel host.
 2. **Observability lanjutan**: agregasi `tool_events` lintas sesi, alerting, dan ekspor OpenTelemetry (sekarang tabel lokal + `laction traces` + `GET /traces`).
-3. **MCP lebih luas**: transport HTTP/SSE, OAuth, serta allowlist per-tool (sekarang per-server, stdio saja).
+3. **MCP lebih luas**: transport HTTP/SSE dan OAuth (kini `stdio` saja). Allowlist per-tool & validasi `inputSchema` sudah ada.
 4. **Subagent pool** dengan batas konkurensi adaptif; deadline wall-clock sudah ada di `team.py`.
 5. `MCPClient` + tool discovery dinamis, lalu gateway adapter (webhook).
 

@@ -131,10 +131,19 @@ def _add_subcommands(p: argparse.ArgumentParser):
         help="Argumen command (taruh paling akhir; boleh mengandung tanda '-')",
     )
     mcp_add.add_argument("--description", default="")
+    mcp_add.add_argument(
+        "--allow-tools",
+        nargs="*",
+        default=[],
+        help="Allowlist nama tool pada server ini (kosong = semua tool, tetap butuh approval)",
+    )
     mcp_rm = mcp_sub.add_parser("remove", help="Hapus server MCP")
     mcp_rm.add_argument("--name", required=True)
     mcp_tools = mcp_sub.add_parser("tools", help="Daftar tool pada satu server (menjalankannya sementara)")
     mcp_tools.add_argument("--name", required=True)
+    mcp_allow = mcp_sub.add_parser("allow", help="Batasi tool yang boleh dipanggil pada satu server")
+    mcp_allow.add_argument("--name", required=True)
+    mcp_allow.add_argument("--tools", nargs="*", default=[], help="Nama tool (kosong = izinkan semua)")
 
     cron_p = sub.add_parser("cron", help="Kelola tugas terjadwal")
     cron_sub = cron_p.add_subparsers(dest="cron_command")
@@ -535,6 +544,8 @@ def cmd_mcp(cfg: Config, args: argparse.Namespace) -> int:
         for server in servers:
             state = "enabled" if server["enabled"] else "disabled"
             print(f"  {server['name']:<12} [{state}] {server['command']} {' '.join(server['args'])}")
+            if server.get("tools"):
+                print(f"               tools: {', '.join(server['tools'])}")
             if server.get("description"):
                 print(f"               {server['description']}")
         print(f"File: {registry.path}")
@@ -543,24 +554,48 @@ def cmd_mcp(cfg: Config, args: argparse.Namespace) -> int:
     if command == "add":
         raw_args = list(getattr(args, "args", []) or [])
         description = getattr(args, "description", "") or ""
+        allowed_tools = list(getattr(args, "allow_tools", []) or [])
+
         # `--args` memakai REMAINDER agar bisa memuat token berawalan '-' seperti
-        # `-m`; kalau user menaruh --description sesudahnya, pisahkan kembali.
-        if "--description" in raw_args:
-            idx = raw_args.index("--description")
-            if not description and idx + 1 < len(raw_args):
-                description = raw_args[idx + 1]
-            raw_args = raw_args[:idx]
+        # `-m`. Konsekuensinya opsi CLI yang ditulis SESUDAH --args ikut tertelan;
+        # di sini opsi itu dikeluarkan lagi supaya tidak menjadi argumen server.
+        def _extract(flag: str) -> list[str]:
+            nonlocal raw_args
+            if flag not in raw_args:
+                return []
+            idx = raw_args.index(flag)
+            tail = raw_args[idx + 1:]
+            values: list[str] = []
+            for token in tail:
+                if token.startswith("--"):
+                    break
+                values.append(token)
+            raw_args = raw_args[:idx] + tail[len(values):]
+            return values
+
+        extracted_desc = _extract("--description")
+        if extracted_desc and not description:
+            description = " ".join(extracted_desc)
+        extracted_tools = _extract("--allow-tools")
+        if extracted_tools:
+            allowed_tools = extracted_tools
         try:
             server = registry.add_server(
                 name=args.name,
                 command=args.mcp_server_command,
                 args=raw_args,
                 description=description,
+                tools=allowed_tools,
             )
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
             return 2
         print(f"✅ Server MCP '{server['name']}' ditambahkan ({server['command']}).")
+        allowed = server.get("tools") or []
+        if allowed:
+            print(f"   Allowlist tool: {', '.join(allowed)}")
+        else:
+            print("   Allowlist tool: semua tool server (disarankan dibatasi dengan --allow-tools).")
         print("   Tool MCP tetap memerlukan approval setiap pemanggilan.")
         return 0
 
@@ -588,6 +623,16 @@ def cmd_mcp(cfg: Config, args: argparse.Namespace) -> int:
               f"(protocol {info.get('protocolVersion')})")
         for tool in tools:
             print(f"  {tool['name']:<20} {tool['description']}")
+        return 0
+
+    if command == "allow":
+        names = list(getattr(args, "tools", None) or [])
+        if not registry.set_tools(args.name, names):
+            print(f"Server MCP tidak ditemukan: {args.name}", file=sys.stderr)
+            return 1
+        print(
+            f"🔐 '{args.name}' allowlist: " + (", ".join(names) if names else "semua tool server")
+        )
         return 0
 
     print(f"Subcommand mcp tidak dikenal: {command}", file=sys.stderr)

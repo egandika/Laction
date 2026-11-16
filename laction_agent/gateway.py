@@ -11,7 +11,8 @@ Endpoint:
 - `GET  /history?sid=`   riwayat sesi
 - `GET  /cron`           daftar cron job
 - `GET  /traces?sid=`    tool events + metrics (observability)
-- `GET  /mcp`            server MCP terdaftar (allowlist)
+- `GET  /mcp`            server MCP terdaftar (allowlist + allowlist per-tool)
+- `POST /mcp`            {name} -> uji koneksi server (initialize + tools/list)
 - `POST /chat`           {message, session_id?} -> {reply, session_id}
 - `POST /cron`           {name, task, interval_seconds}
 - `POST /memory`         {note, target: memory|user} atau {action:"prune", ...}
@@ -36,6 +37,7 @@ from .config import Config
 from .cron.scheduler import CronScheduler
 from .memory.manager import MemoryManager
 from .memory.session_db import SessionDB
+from .mcp.client import MCPError, MCPStdioClient
 from .mcp.registry import MCPRegistry
 from .skills.manager import SkillManager
 from .tools.registry import get_registry
@@ -334,8 +336,12 @@ def make_handler(
                     "events": db.tool_events(sid, limit=limit),
                 })
             if path == "/mcp":
-                registry = MCPRegistry(home)
-                return self._json(200, {"servers": registry.list_servers(), "path": str(registry.path)})
+                mc = MCPRegistry(home)
+                return self._json(200, {
+                    "servers": mc.list_servers(),
+                    "path": str(mc.path),
+                    "note": "Allowlist per server; kosong = semua tool server, tetap perlu approval.",
+                })
             return self._json(404, {"error": f"Endpoint tidak ditemukan: {path}"})
 
         def do_POST(self):  # noqa: N802
@@ -400,6 +406,34 @@ def make_handler(
                     "stored": stored,
                     "redacted": bool(stored) and stored != " ".join(note.splitlines()).strip(),
                     "visible_chars": raw_len,
+                })
+
+            if path == "/mcp":
+                # Uji koneksi satu server MCP dari UI, hanya server di allowlist.
+                mc = MCPRegistry(home)
+                name = str(data.get("name") or "").strip().lower()
+                if not name:
+                    return self._json(400, {"error": "Field 'name' wajib diisi."})
+                server = mc.get(name)
+                if server is None:
+                    return self._json(404, {"error": f"Server MCP '{name}' tidak ada di allowlist."})
+                if not server["enabled"]:
+                    return self._json(400, {"error": f"Server MCP '{name}' dinonaktifkan."})
+                try:
+                    with MCPStdioClient(
+                        server["command"], server["args"], server["env"], timeout=20
+                    ) as client:
+                        info = client.initialize()
+                        tools = [t["name"] for t in client.list_tools()]
+                except MCPError as exc:
+                    return self._json(502, {"error": f"MCP: {exc}"})
+                allowed = server.get("tools") or []
+                return self._json(200, {
+                    "server": name,
+                    "info": info,
+                    "tools": tools,
+                    "allowed": allowed,
+                    "blocked": [t for t in tools if allowed and t not in allowed],
                 })
 
             if path == "/reset":
